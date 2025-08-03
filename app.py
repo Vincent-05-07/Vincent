@@ -15,6 +15,21 @@ def get_connection():
         sslmode=os.getenv("PGSSLMODE", "require")
     )
 
+# 🌐 Root route to confirm service is running
+@app.route('/')
+def index():
+    return jsonify({"message": "Flask API is live!"})
+
+# ❤️ Health check route for DB connectivity
+@app.route('/health', methods=['GET'])
+def health_check():
+    try:
+        conn = get_connection()
+        conn.close()
+        return jsonify({"status": "healthy"}), 200
+    except Exception as e:
+        return jsonify({"status": "unhealthy", "error": str(e)}), 500
+
 # 🖼️ Upload multiple images for a user
 @app.route('/upload-images', methods=['POST'])
 def upload_images():
