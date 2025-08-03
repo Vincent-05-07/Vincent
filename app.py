@@ -1,20 +1,18 @@
 import os
 import psycopg2
 from flask import Flask, request, jsonify
-from dotenv import load_dotenv
 
-load_dotenv("file.env")
 app = Flask(__name__)
 
 # 🔌 Database connection function
 def get_connection():
     return psycopg2.connect(
-        dbname="project_300db",
+        dbname=os.getenv("PGDATABASE"),
         user=os.getenv("PGUSER"),
         password=os.getenv("PGPASSWORD"),
-        host="ep-green-art-a2qy87gx-pooler.eu-central-1.aws.neon.tech",
-        port="5432",
-        sslmode="require"
+        host=os.getenv("PGHOST"),
+        port=os.getenv("PGPORT", "5432"),
+        sslmode=os.getenv("PGSSLMODE", "require")
     )
 
 # 🖼️ Upload multiple images for a user
