@@ -4,6 +4,9 @@ from flask import Flask, request, jsonify
 
 app = Flask(__name__)
 
+# Increase max upload size (50MB)
+app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024
+
 # 🔌 Database connection function
 def get_connection():
     return psycopg2.connect(
@@ -30,7 +33,7 @@ def health_check():
     except Exception as e:
         return jsonify({"status": "unhealthy", "error": str(e)}), 500
 
-# 🖼️ Upload multiple images for a user
+# 🖼️ Upload multiple images for a user (bulk insert)
 @app.route('/upload-images', methods=['POST'])
 def upload_images():
     user_code = request.form.get('user_code')
@@ -43,14 +46,18 @@ def upload_images():
         conn = get_connection()
         cur = conn.cursor()
 
+        # Prepare bulk insert list
+        records = []
         for index, image_file in enumerate(images, start=1):
             file_path = f"wil-firm-pics/{user_code}/image_{index}.jpg"
-            image_data = image_file.read()
+            image_data = psycopg2.Binary(image_file.read())
+            records.append((user_code, file_path, image_data))
 
-            cur.execute("""
-                INSERT INTO firm_images (user_code, file_path, image_data)
-                VALUES (%s, %s, %s)
-            """, (user_code, file_path, psycopg2.Binary(image_data)))
+        # Bulk insert all images at once
+        cur.executemany("""
+            INSERT INTO firm_images (user_code, file_path, image_data)
+            VALUES (%s, %s, %s)
+        """, records)
 
         conn.commit()
         cur.close()
@@ -58,7 +65,7 @@ def upload_images():
 
         return jsonify({
             "message": f"{len(images)} images saved for user {user_code}",
-            "file_paths": [f"wil-firm-pics/{user_code}/image_{i+1}.jpg" for i in range(len(images))]
+            "file_paths": [r[1] for r in records]
         }), 200
 
     except Exception as e:
@@ -87,4 +94,5 @@ def get_images(user_code):
 
 # 🚀 Run the Flask app (Render-compatible)
 if __name__ == '__main__':
+    # Bind to 0.0.0.0 for external access and use PORT from env
     app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
