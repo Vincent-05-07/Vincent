@@ -1,6 +1,7 @@
 import os
 import psycopg2
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, send_file
+from io import BytesIO
 
 app = Flask(__name__)
 
@@ -18,12 +19,12 @@ def get_connection():
         sslmode=os.getenv("PGSSLMODE", "require")
     )
 
-# 🌐 Root route to confirm service is running
+# 🌐 Root route
 @app.route('/')
 def index():
     return jsonify({"message": "Flask API is live!"})
 
-# ❤️ Health check route for DB connectivity
+# ❤️ Health check route
 @app.route('/health', methods=['GET'])
 def health_check():
     try:
@@ -46,14 +47,12 @@ def upload_images():
         conn = get_connection()
         cur = conn.cursor()
 
-        # Prepare bulk insert list
         records = []
         for index, image_file in enumerate(images, start=1):
             file_path = f"wil-firm-pics/{user_code}/image_{index}.jpg"
             image_data = psycopg2.Binary(image_file.read())
             records.append((user_code, file_path, image_data))
 
-        # Bulk insert all images at once
         cur.executemany("""
             INSERT INTO firm_images (user_code, file_path, image_data)
             VALUES (%s, %s, %s)
@@ -71,7 +70,7 @@ def upload_images():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-# 📁 Retrieve image file paths by user_code
+# 📁 Retrieve image file paths by user_code (returns full URLs now)
 @app.route('/get-images/<user_code>', methods=['GET'])
 def get_images(user_code):
     try:
@@ -84,15 +83,47 @@ def get_images(user_code):
         cur.close()
         conn.close()
 
+        # Convert file paths into API URLs
+        base_url = request.host_url.rstrip('/')
+        urls = [
+            f"{base_url}/serve-image/{user_code}/{os.path.basename(row[0])}"
+            for row in rows
+        ]
+
         return jsonify({
             "user_code": user_code,
-            "file_paths": [row[0] for row in rows]
+            "file_paths": urls
         }), 200
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-# 🚀 Run the Flask app (Render-compatible)
+# 📤 Serve actual image bytes
+@app.route('/serve-image/<user_code>/<filename>', methods=['GET'])
+def serve_image(user_code, filename):
+    try:
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT image_data FROM firm_images
+            WHERE user_code = %s AND file_path LIKE %s
+        """, (user_code, f"%{filename}"))
+        row = cur.fetchone()
+        cur.close()
+        conn.close()
+
+        if not row:
+            return jsonify({"error": "Image not found"}), 404
+
+        return send_file(
+            BytesIO(row[0]),
+            mimetype='image/jpeg',
+            as_attachment=False
+        )
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+# 🚀 Run the Flask app
 if __name__ == '__main__':
-    # Bind to 0.0.0.0 for external access and use PORT from env
     app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
