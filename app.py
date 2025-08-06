@@ -8,7 +8,7 @@ app = Flask(__name__)
 # Increase max upload size (50MB)
 app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024
 
-# 🔌 Database connection function
+# 🔌 Database connection
 def get_connection():
     return psycopg2.connect(
         dbname=os.getenv("PGDATABASE"),
@@ -24,7 +24,7 @@ def get_connection():
 def index():
     return jsonify({"message": "Flask API is live!"})
 
-# ❤️ Health check route
+# ❤️ Health check
 @app.route('/health', methods=['GET'])
 def health_check():
     try:
@@ -34,7 +34,7 @@ def health_check():
     except Exception as e:
         return jsonify({"status": "unhealthy", "error": str(e)}), 500
 
-# 🖼️ Upload multiple images for a user (bulk insert)
+# 🖼️ Upload multiple images for a user
 @app.route('/upload-images', methods=['POST'])
 def upload_images():
     user_code = request.form.get('user_code')
@@ -70,7 +70,7 @@ def upload_images():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-# 📁 Retrieve image file paths by user_code (returns full URLs now)
+# 📁 Retrieve image URLs for a user
 @app.route('/get-images/<user_code>', methods=['GET'])
 def get_images(user_code):
     try:
@@ -83,7 +83,7 @@ def get_images(user_code):
         cur.close()
         conn.close()
 
-        # Convert file paths into API URLs
+        # Build full URLs pointing to /serve-image
         base_url = request.host_url.rstrip('/')
         urls = [
             f"{base_url}/serve-image/{user_code}/{os.path.basename(row[0])}"
@@ -98,7 +98,7 @@ def get_images(user_code):
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-# 📤 Serve actual image bytes
+# 📤 Serve an actual image
 @app.route('/serve-image/<user_code>/<filename>', methods=['GET'])
 def serve_image(user_code, filename):
     try:
@@ -107,6 +107,7 @@ def serve_image(user_code, filename):
         cur.execute("""
             SELECT image_data FROM firm_images
             WHERE user_code = %s AND file_path LIKE %s
+            LIMIT 1
         """, (user_code, f"%{filename}"))
         row = cur.fetchone()
         cur.close()
