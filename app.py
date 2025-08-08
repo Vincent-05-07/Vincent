@@ -2,8 +2,15 @@ import os
 import psycopg2
 from flask import Flask, request, jsonify, send_file
 from io import BytesIO
+from flask_cors import CORS  # <-- add this import
 
 app = Flask(__name__)
+
+# Only allow CORS for your dashboard origin on the image endpoints
+CORS(app, resources={
+    r"/get-images/*": {"origins": "http://127.0.0.1:5500"},
+    r"/serve-image/*": {"origins": "http://127.0.0.1:5500"},
+})
 
 # Increase max upload size (50MB)
 app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024
@@ -39,14 +46,12 @@ def health_check():
 def upload_images():
     user_code = request.form.get('user_code')
     images = request.files.getlist('images')
-
     if not user_code or not images:
         return jsonify({"error": "Missing user_code or images"}), 400
 
     try:
         conn = get_connection()
         cur = conn.cursor()
-
         records = []
         for index, image_file in enumerate(images, start=1):
             file_path = f"wil-firm-pics/{user_code}/image_{index}.jpg"
@@ -61,7 +66,6 @@ def upload_images():
         conn.commit()
         cur.close()
         conn.close()
-
         return jsonify({
             "message": f"{len(images)} images saved for user {user_code}",
             "file_paths": [r[1] for r in records]
@@ -83,13 +87,11 @@ def get_images(user_code):
         cur.close()
         conn.close()
 
-        # Build full URLs pointing to /serve-image
         base_url = request.host_url.rstrip('/')
         urls = [
             f"{base_url}/serve-image/{user_code}/{os.path.basename(row[0])}"
             for row in rows
         ]
-
         return jsonify({
             "user_code": user_code,
             "file_paths": urls
