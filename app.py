@@ -1,185 +1,171 @@
 import os
-import psycopg2
-from flask import Flask, request, jsonify, send_file
-from io import BytesIO
-from flask_cors import CORS
+from flask import Flask, request, jsonify, send_from_directory
+from flask_sqlalchemy import SQLAlchemy
+from werkzeug.utils import secure_filename
 
+# ----------------
+# Config
+# ----------------
 app = Flask(__name__)
+app.config['UPLOAD_FOLDER_IMAGES'] = 'uploads/images'
+app.config['UPLOAD_FOLDER_DOCS'] = 'uploads/documents'
+app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///files.db'
+app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
-# Allow CORS for all origins for testing
-CORS(app, resources={r"/*": {"origins": "*"}})
+os.makedirs(app.config['UPLOAD_FOLDER_IMAGES'], exist_ok=True)
+os.makedirs(app.config['UPLOAD_FOLDER_DOCS'], exist_ok=True)
 
-# Increase max upload size (50MB)
-app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024
+db = SQLAlchemy(app)
 
-# Database connection
-def get_connection():
-    return psycopg2.connect(
-        dbname=os.getenv("PGDATABASE"),
-        user=os.getenv("PGUSER"),
-        password=os.getenv("PGPASSWORD"),
-        host=os.getenv("PGHOST"),
-        port=os.getenv("PGPORT", "5432"),
-        sslmode=os.getenv("PGSSLMODE", "require")
-    )
+# ----------------
+# Database Models
+# ----------------
+class Picture(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    filename = db.Column(db.String(255), nullable=False)
 
-@app.route('/')
-def index():
-    return jsonify({"message": "Flask API is live!"})
+class Document(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    cv_filename = db.Column(db.String(255), nullable=False)
+    id_filename = db.Column(db.String(255), nullable=False)
 
-@app.route('/health', methods=['GET'])
-def health_check():
-    try:
-        conn = get_connection()
-        conn.close()
-        return jsonify({"status": "healthy"}), 200
-    except Exception as e:
-        return jsonify({"status": "unhealthy", "error": str(e)}), 500
+with app.app_context():
+    db.create_all()
 
-# CREATE - Upload images
-@app.route('/upload-images', methods=['POST'])
-def upload_images():
-    user_code = request.form.get('user_code')
-    images = request.files.getlist('images')
-    if not user_code or not images:
-        return jsonify({"error": "Missing user_code or images"}), 400
+# ----------------
+# Helper
+# ----------------
+def save_file(file, folder):
+    filename = secure_filename(file.filename)
+    filepath = os.path.join(folder, filename)
+    file.save(filepath)
+    return filename
 
-    try:
-        conn = get_connection()
-        cur = conn.cursor()
-        records = []
-        for index, image_file in enumerate(images, start=1):
-            file_path = f"wil-firm-pics/{user_code}/image_{index}.jpg"
-            image_data = psycopg2.Binary(image_file.read())
-            records.append((user_code, file_path, image_data))
+# ----------------
+# CRUD - Pictures
+# ----------------
 
-        cur.executemany("""
-            INSERT INTO firm_images (user_code, file_path, image_data)
-            VALUES (%s, %s, %s)
-        """, records)
+# Create
+@app.route("/pictures", methods=["POST"])
+def upload_picture():
+    if "image" not in request.files:
+        return jsonify({"error": "No image provided"}), 400
+    image = request.files["image"]
+    filename = save_file(image, app.config['UPLOAD_FOLDER_IMAGES'])
+    new_pic = Picture(filename=filename)
+    db.session.add(new_pic)
+    db.session.commit()
+    return jsonify({"message": "Image uploaded", "id": new_pic.id}), 201
 
-        conn.commit()
-        cur.close()
-        conn.close()
-        return jsonify({
-            "message": f"{len(images)} images saved for user {user_code}",
-            "file_paths": [r[1] for r in records]
-        }), 200
+# Read all
+@app.route("/pictures", methods=["GET"])
+def get_pictures():
+    pics = Picture.query.all()
+    return jsonify([{"id": p.id, "filename": p.filename} for p in pics])
 
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
+# Read one
+@app.route("/pictures/<int:pic_id>", methods=["GET"])
+def get_picture(pic_id):
+    pic = Picture.query.get_or_404(pic_id)
+    return send_from_directory(app.config['UPLOAD_FOLDER_IMAGES'], pic.filename)
 
-# READ - Get all images for a user
-@app.route('/get-images/<user_code>', methods=['GET'])
-def get_images(user_code):
-    try:
-        conn = get_connection()
-        cur = conn.cursor()
-        cur.execute("SELECT file_path FROM firm_images WHERE user_code = %s", (user_code,))
-        rows = cur.fetchall()
-        cur.close()
-        conn.close()
+# Update
+@app.route("/pictures/<int:pic_id>", methods=["PUT"])
+def update_picture(pic_id):
+    pic = Picture.query.get_or_404(pic_id)
+    if "image" not in request.files:
+        return jsonify({"error": "No image provided"}), 400
+    image = request.files["image"]
+    filename = save_file(image, app.config['UPLOAD_FOLDER_IMAGES'])
+    pic.filename = filename
+    db.session.commit()
+    return jsonify({"message": "Image updated"})
 
-        base_url = request.host_url.rstrip('/')
-        urls = [f"{base_url}/serve-image/{user_code}/{os.path.basename(row[0])}" for row in rows]
+# Delete
+@app.route("/pictures/<int:pic_id>", methods=["DELETE"])
+def delete_picture(pic_id):
+    pic = Picture.query.get_or_404(pic_id)
+    os.remove(os.path.join(app.config['UPLOAD_FOLDER_IMAGES'], pic.filename))
+    db.session.delete(pic)
+    db.session.commit()
+    return jsonify({"message": "Image deleted"})
 
-        return jsonify({"user_code": user_code, "file_paths": urls}), 200
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
+# ----------------
+# CRUD - Documents (CV + ID)
+# ----------------
 
-# READ - Serve a single image
-@app.route('/serve-image/<user_code>/<filename>', methods=['GET'])
-def serve_image(user_code, filename):
-    try:
-        conn = get_connection()
-        cur = conn.cursor()
-        cur.execute("""
-            SELECT image_data FROM firm_images
-            WHERE user_code = %s AND file_path LIKE %s
-            LIMIT 1
-        """, (user_code, f"%{filename}"))
-        row = cur.fetchone()
-        cur.close()
-        conn.close()
+# Create
+@app.route("/documents", methods=["POST"])
+def upload_documents():
+    if "cvFile" not in request.files or "idFile" not in request.files:
+        return jsonify({"error": "Both CV and ID must be provided"}), 400
+    cv = request.files["cvFile"]
+    id_doc = request.files["idFile"]
 
-        if not row:
-            return jsonify({"error": "Image not found"}), 404
+    cv_filename = save_file(cv, app.config['UPLOAD_FOLDER_DOCS'])
+    id_filename = save_file(id_doc, app.config['UPLOAD_FOLDER_DOCS'])
 
-        return send_file(BytesIO(row[0]), mimetype='image/jpeg')
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
+    new_doc = Document(cv_filename=cv_filename, id_filename=id_filename)
+    db.session.add(new_doc)
+    db.session.commit()
+    return jsonify({"message": "Documents uploaded", "id": new_doc.id}), 201
 
-# UPDATE - Replace an image
-@app.route('/update-image/<user_code>/<filename>', methods=['PUT'])
-def update_image(user_code, filename):
-    if 'image' not in request.files:
-        return jsonify({"error": "Missing image file"}), 400
+# Read all
+@app.route("/documents", methods=["GET"])
+def get_documents():
+    docs = Document.query.all()
+    return jsonify([{
+        "id": d.id,
+        "cv_filename": d.cv_filename,
+        "id_filename": d.id_filename
+    } for d in docs])
 
-    try:
-        new_image = request.files['image']
-        image_data = psycopg2.Binary(new_image.read())
-        file_path = f"wil-firm-pics/{user_code}/{filename}"
+# Read one (download CV or ID)
+@app.route("/documents/<int:doc_id>/<string:filetype>", methods=["GET"])
+def get_document(doc_id, filetype):
+    doc = Document.query.get_or_404(doc_id)
+    if filetype == "cv":
+        return send_from_directory(app.config['UPLOAD_FOLDER_DOCS'], doc.cv_filename)
+    elif filetype == "id":
+        return send_from_directory(app.config['UPLOAD_FOLDER_DOCS'], doc.id_filename)
+    else:
+        return jsonify({"error": "Invalid filetype. Use 'cv' or 'id'"}), 400
 
-        conn = get_connection()
-        cur = conn.cursor()
-        cur.execute("""
-            UPDATE firm_images
-            SET image_data = %s
-            WHERE user_code = %s AND file_path LIKE %s
-        """, (image_data, user_code, f"%{filename}"))
+# Update
+@app.route("/documents/<int:doc_id>", methods=["PUT"])
+def update_document(doc_id):
+    doc = Document.query.get_or_404(doc_id)
 
-        if cur.rowcount == 0:
-            return jsonify({"error": "Image not found"}), 404
+    if "cvFile" in request.files:
+        cv = request.files["cvFile"]
+        cv_filename = save_file(cv, app.config['UPLOAD_FOLDER_DOCS'])
+        doc.cv_filename = cv_filename
 
-        conn.commit()
-        cur.close()
-        conn.close()
+    if "idFile" in request.files:
+        id_doc = request.files["idFile"]
+        id_filename = save_file(id_doc, app.config['UPLOAD_FOLDER_DOCS'])
+        doc.id_filename = id_filename
 
-        return jsonify({"message": f"Image {filename} updated for {user_code}"}), 200
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
+    db.session.commit()
+    return jsonify({"message": "Documents updated"})
 
-# DELETE - Delete a specific image
-@app.route('/delete-image/<user_code>/<filename>', methods=['DELETE'])
-def delete_image(user_code, filename):
-    try:
-        conn = get_connection()
-        cur = conn.cursor()
-        cur.execute("""
-            DELETE FROM firm_images
-            WHERE user_code = %s AND file_path LIKE %s
-        """, (user_code, f"%{filename}"))
+# Delete
+@app.route("/documents/<int:doc_id>", methods=["DELETE"])
+def delete_document(doc_id):
+    doc = Document.query.get_or_404(doc_id)
+    os.remove(os.path.join(app.config['UPLOAD_FOLDER_DOCS'], doc.cv_filename))
+    os.remove(os.path.join(app.config['UPLOAD_FOLDER_DOCS'], doc.id_filename))
+    db.session.delete(doc)
+    db.session.commit()
+    return jsonify({"message": "Documents deleted"})
 
-        if cur.rowcount == 0:
-            return jsonify({"error": "Image not found"}), 404
+# ----------------
+# Health check
+# ----------------
+@app.route("/health")
+def health():
+    return jsonify({"status": "healthy"})
 
-        conn.commit()
-        cur.close()
-        conn.close()
 
-        return jsonify({"message": f"Image {filename} deleted for {user_code}"}), 200
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-# DELETE - Delete all images for a user
-@app.route('/delete-all-images/<user_code>', methods=['DELETE'])
-def delete_all_images(user_code):
-    try:
-        conn = get_connection()
-        cur = conn.cursor()
-        cur.execute("DELETE FROM firm_images WHERE user_code = %s", (user_code,))
-        deleted_count = cur.rowcount
-
-        if deleted_count == 0:
-            return jsonify({"error": "No images found"}), 404
-
-        conn.commit()
-        cur.close()
-        conn.close()
-
-        return jsonify({"message": f"All {deleted_count} images deleted for {user_code}"}), 200
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
+if __name__ == "__main__":
+    app.run(debug=True)
