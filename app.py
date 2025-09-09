@@ -5,6 +5,7 @@ from io import BytesIO
 from flask_cors import CORS
 from flask_sqlalchemy import SQLAlchemy
 from werkzeug.utils import secure_filename
+from datetime import datetime
 
 # ----------------
 # Flask Config
@@ -16,9 +17,11 @@ app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024
 
 # Image upload folders for document handling
 app.config['UPLOAD_FOLDER_DOCS'] = 'uploads/documents'
+app.config['UPLOAD_FOLDER_ASSIGNMENTS'] = 'uploads/assignments'
 os.makedirs(app.config['UPLOAD_FOLDER_DOCS'], exist_ok=True)
+os.makedirs(app.config['UPLOAD_FOLDER_ASSIGNMENTS'], exist_ok=True)
 
-# SQLAlchemy config for documents and assignments
+# SQLAlchemy config
 app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///files.db'
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 db = SQLAlchemy(app)
@@ -26,7 +29,11 @@ db = SQLAlchemy(app)
 # ----------------
 # CORS settings
 # ----------------
-CORS(app, resources={r"*": {"origins": "*"}})
+CORS(app, resources={
+    r"/get-images/*": {"origins": "*"},
+    r"/serve-image/*": {"origins": "*"},
+    r"/documents/*": {"origins": "*"}
+})
 
 # ----------------
 # PostgreSQL Connection (for images)
@@ -42,7 +49,7 @@ def get_connection():
     )
 
 # ----------------
-# SQLAlchemy Models (Documents & Assignments)
+# SQLAlchemy Models
 # ----------------
 class Document(db.Model):
     id = db.Column(db.Integer, primary_key=True)
@@ -54,18 +61,10 @@ class Assignment(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     lecture_id = db.Column(db.String(50), nullable=False)
     title = db.Column(db.String(255), nullable=False)
-    description = db.Column(db.Text, nullable=True)
-    deadline_iso = db.Column(db.String(50), nullable=False)
-    file_path = db.Column(db.String(255), nullable=True)
-    status = db.Column(db.String(50), default="open")  # open / closed
-
-class AssignmentSubmission(db.Model):
-    id = db.Column(db.Integer, primary_key=True)
-    assignment_id = db.Column(db.Integer, nullable=False)
-    user_code = db.Column(db.String(50), nullable=False)
-    text_answer = db.Column(db.Text, nullable=True)
-    file_path = db.Column(db.String(255), nullable=True)
-    submitted_at = db.Column(db.DateTime, default=db.func.current_timestamp())
+    description = db.Column(db.Text)
+    deadline_iso = db.Column(db.String(50))
+    status = db.Column(db.String(20), default="open")
+    file_url = db.Column(db.String(255))  # Optional file link
 
 with app.app_context():
     db.create_all()
@@ -78,7 +77,7 @@ def save_file(file, folder):
     os.makedirs(folder, exist_ok=True)
     filepath = os.path.join(folder, filename)
     file.save(filepath)
-    return filepath
+    return filename
 
 # ----------------
 # Root + Health
@@ -170,134 +169,164 @@ def delete_document(user_code, doc_id):
 # ----------------
 @app.route("/api/assignments", methods=["POST"])
 def create_assignment():
-    lecture_id = request.form.get("lecture_id")
-    title = request.form.get("title")
-    description = request.form.get("description", "")
-    deadline_iso = request.form.get("deadline_iso")
-    file = request.files.get("file")
-
+    data = request.form
+    lecture_id = data.get("lecture_id")
+    title = data.get("title")
+    description = data.get("description")
+    deadline_iso = data.get("deadline_iso")
     if not lecture_id or not title or not deadline_iso:
-        return jsonify({"error": "lecture_id, title, and deadline_iso are required"}), 400
+        return jsonify({"error": "lecture_id, title, and deadline_iso required"}), 400
 
-    file_path = None
-    if file:
-        folder = os.path.join(app.config['UPLOAD_FOLDER_DOCS'], "assignments", lecture_id)
+    file_url = None
+    if "file" in request.files:
+        folder = os.path.join(app.config['UPLOAD_FOLDER_ASSIGNMENTS'], lecture_id)
         os.makedirs(folder, exist_ok=True)
-        file_path = save_file(file, folder)
+        file_url = f"{folder}/{secure_filename(request.files['file'].filename)}"
+        request.files['file'].save(file_url)
 
-    assignment = Assignment(
+    new_assignment = Assignment(
         lecture_id=lecture_id,
         title=title,
         description=description,
         deadline_iso=deadline_iso,
-        file_path=file_path
+        file_url=file_url
     )
-    db.session.add(assignment)
+    db.session.add(new_assignment)
     db.session.commit()
-    return jsonify({"id": assignment.id}), 201
+    return jsonify({"message": "Assignment created", "id": new_assignment.id}), 201
 
 @app.route("/api/assignments", methods=["GET"])
 def list_assignments():
     lecture_id = request.args.get("lecture_id")
-    if not lecture_id:
-        return jsonify({"error": "lecture_id is required"}), 400
-    assignments = Assignment.query.filter_by(lecture_id=lecture_id).all()
+    query = Assignment.query
+    if lecture_id:
+        query = query.filter_by(lecture_id=lecture_id)
+    assignments = query.all()
     return jsonify([{
         "id": a.id,
         "lecture_id": a.lecture_id,
         "title": a.title,
         "description": a.description,
         "deadline_iso": a.deadline_iso,
-        "file_url": f"{request.host_url.rstrip('/')}/documents/assignments/{a.lecture_id}/{os.path.basename(a.file_path)}" if a.file_path else None,
-        "status": a.status
+        "status": a.status,
+        "file_url": a.file_url
     } for a in assignments])
-
-@app.route("/api/assignments/<int:assignment_id>", methods=["GET"])
-def get_assignment(assignment_id):
-    a = Assignment.query.get_or_404(assignment_id)
-    return jsonify({
-        "id": a.id,
-        "lecture_id": a.lecture_id,
-        "title": a.title,
-        "description": a.description,
-        "deadline_iso": a.deadline_iso,
-        "file_url": f"{request.host_url.rstrip('/')}/documents/assignments/{a.lecture_id}/{os.path.basename(a.file_path)}" if a.file_path else None,
-        "status": a.status
-    })
 
 @app.route("/api/assignments/<int:assignment_id>", methods=["PATCH"])
 def update_assignment(assignment_id):
-    a = Assignment.query.get_or_404(assignment_id)
-    data = request.get_json() or {}
-
-    a.title = data.get("title", a.title)
-    a.description = data.get("description", a.description)
-    a.deadline_iso = data.get("deadline_iso", a.deadline_iso)
-    a.status = data.get("status", a.status)
+    assignment = Assignment.query.get_or_404(assignment_id)
+    data = request.get_json()
+    assignment.title = data.get("title", assignment.title)
+    assignment.description = data.get("description", assignment.description)
+    assignment.deadline_iso = data.get("deadline_iso", assignment.deadline_iso)
+    assignment.status = data.get("status", assignment.status)
     db.session.commit()
     return jsonify({"message": "Assignment updated"})
 
 @app.route("/api/assignments/<int:assignment_id>", methods=["DELETE"])
 def delete_assignment(assignment_id):
-    a = Assignment.query.get_or_404(assignment_id)
-    if a.file_path and os.path.exists(a.file_path):
-        os.remove(a.file_path)
-    db.session.delete(a)
+    assignment = Assignment.query.get_or_404(assignment_id)
+    db.session.delete(assignment)
     db.session.commit()
     return jsonify({"message": "Assignment deleted"})
 
 # ----------------
-# SUBMISSIONS
+# ASSIGNMENT SUBMISSIONS CRUD
 # ----------------
-@app.route("/api/assignments/<int:assignment_id>/submissions", methods=["POST"])
-def submit_assignment(assignment_id):
+@app.route("/api/assignments/<assignment_id>/submissions", methods=["PUT"])
+def update_submission(assignment_id):
     user_code = request.form.get("user_code")
-    text_answer = request.form.get("text_answer", "")
-    file = request.files.get("file")
-
     if not user_code:
         return jsonify({"error": "user_code is required"}), 400
 
-    file_path = None
-    if file:
-        folder = os.path.join(app.config['UPLOAD_FOLDER_DOCS'], "assignments", str(assignment_id), user_code)
-        os.makedirs(folder, exist_ok=True)
-        file_path = save_file(file, folder)
+    folder = os.path.join(app.config['UPLOAD_FOLDER_ASSIGNMENTS'], assignment_id, user_code)
+    os.makedirs(folder, exist_ok=True)
 
-    submission = AssignmentSubmission(
-        assignment_id=assignment_id,
-        user_code=user_code,
-        text_answer=text_answer,
-        file_path=file_path
-    )
-    db.session.add(submission)
-    db.session.commit()
+    metadata_path = os.path.join(folder, "metadata.json")
+    import json
+    metadata = {}
+    if os.path.exists(metadata_path):
+        with open(metadata_path, "r") as f:
+            metadata = json.load(f)
 
-    file_url = f"{request.host_url.rstrip('/')}/documents/assignments/{assignment_id}/{user_code}/{os.path.basename(file_path)}" if file_path else None
-    return jsonify({
-        "id": submission.id,
-        "assignment_id": assignment_id,
-        "user_code": user_code,
-        "file_url": file_url
-    }), 201
+    description = request.form.get("description")
+    if description:
+        metadata["description"] = description
+        metadata["updated_at"] = datetime.utcnow().isoformat()
 
-@app.route("/api/assignments/<int:assignment_id>/submissions", methods=["GET"])
-def list_submissions(assignment_id):
-    submissions = AssignmentSubmission.query.filter_by(assignment_id=assignment_id).all()
-    return jsonify([{
-        "id": s.id,
-        "assignment_id": s.assignment_id,
-        "user_code": s.user_code,
-        "text_answer": s.text_answer,
-        "file_url": f"{request.host_url.rstrip('/')}/documents/assignments/{s.assignment_id}/{s.user_code}/{os.path.basename(s.file_path)}" if s.file_path else None,
-        "submitted_at": s.submitted_at
-    } for s in submissions])
+    if "file" in request.files:
+        file = request.files["file"]
+        filename = secure_filename(file.filename)
+        file.save(os.path.join(folder, filename))
+        metadata["file"] = filename
 
-# Serve assignment files
-@app.route("/documents/assignments/<assignment_id>/<user_code>/<filename>", methods=["GET"])
-def serve_assignment_file(assignment_id, user_code, filename):
-    folder = os.path.join(app.config['UPLOAD_FOLDER_DOCS'], "assignments", assignment_id, user_code)
-    return send_from_directory(folder, filename)
+    with open(metadata_path, "w") as f:
+        json.dump(metadata, f)
+
+    return jsonify({"message": "Submission updated", "metadata": metadata})
+
+@app.route("/api/assignments/<assignment_id>/submissions", methods=["DELETE"])
+def delete_submission(assignment_id):
+    user_code = request.args.get("user_code")
+    if not user_code:
+        return jsonify({"error": "user_code is required"}), 400
+
+    folder = os.path.join(app.config['UPLOAD_FOLDER_ASSIGNMENTS'], assignment_id, user_code)
+    if not os.path.exists(folder):
+        return jsonify({"error": "Submission not found"}), 404
+
+    import shutil
+    shutil.rmtree(folder)
+    return jsonify({"message": f"Submission deleted for user {user_code}"})
+
+# ----------------
+# IMAGES UPDATE / DELETE
+# ----------------
+@app.route('/update-image/<user_code>/<filename>', methods=['PUT'])
+def update_image(user_code, filename):
+    if "file" not in request.files:
+        return jsonify({"error": "No file uploaded"}), 400
+    new_file = request.files["file"]
+
+    try:
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT id FROM firm_images WHERE user_code = %s AND file_path LIKE %s
+        """, (user_code, f"%{filename}"))
+        row = cur.fetchone()
+        if not row:
+            return jsonify({"error": "Image not found"}), 404
+        image_id = row[0]
+
+        cur.execute("""
+            UPDATE firm_images SET image_data = %s WHERE id = %s
+        """, (psycopg2.Binary(new_file.read()), image_id))
+        conn.commit()
+        cur.close()
+        conn.close()
+        return jsonify({"message": f"Image {filename} updated for user {user_code}"}), 200
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/delete-image/<user_code>/<filename>', methods=['DELETE'])
+def delete_image(user_code, filename):
+    try:
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute("""
+            DELETE FROM firm_images WHERE user_code = %s AND file_path LIKE %s
+        """, (user_code, f"%{filename}"))
+        deleted = cur.rowcount
+        conn.commit()
+        cur.close()
+        conn.close()
+        if deleted == 0:
+            return jsonify({"error": "Image not found"}), 404
+        return jsonify({"message": f"Image {filename} deleted for user {user_code}"}), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 # ----------------
 # Run
