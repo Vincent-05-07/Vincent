@@ -29,11 +29,20 @@ db = SQLAlchemy(app)
 # ----------------
 # CORS settings
 # ----------------
-CORS(app, resources={
-    r"/get-images/*": {"origins": "*"},
-    r"/serve-image/*": {"origins": "*"},
-    r"/documents/*": {"origins": "*"}
-})
+CORS(
+    app,
+    resources={
+        # add assignments (and all api routes) so your frontend can POST/OPTIONS to /api/assignments
+        r"/api/*": {"origins": ["http://127.0.0.1:5500", "http://localhost:5500", "https://project-connect-x4ei.onrender.com"]},
+
+        # keep your existing document/image exposure (you had these already)
+        r"/get-images/*": {"origins": ["http://127.0.0.1:5500", "http://localhost:5500"]},
+        r"/serve-image/*": {"origins": ["http://127.0.0.1:5500", "http://localhost:5500"]},
+        r"/documents/*": {"origins": ["http://127.0.0.1:5500", "http://localhost:5500"]}
+    },
+    supports_credentials=True,
+    allow_headers=["Content-Type", "Authorization", "X-Requested-With", "Accept"]
+)
 
 # ----------------
 # PostgreSQL Connection (for images)
