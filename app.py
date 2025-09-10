@@ -63,7 +63,6 @@ def save_file(file, folder):
 # ----------------
 # Routes
 # ----------------
-
 @app.route('/')
 def index():
     return jsonify({"message": "Flask API is live!"})
@@ -100,9 +99,9 @@ def get_document(user_code, doc_id, filetype):
     doc = Document.query.filter_by(user_code=user_code, id=doc_id).first_or_404()
     folder = os.path.join(app.config['UPLOAD_FOLDER_DOCS'], user_code)
     if filetype == "cv":
-        return send_from_directory(folder, doc.cv_filename)
+        return send_from_directory(folder, doc.cv_filename, as_attachment=True)
     elif filetype == "id":
-        return send_from_directory(folder, doc.id_filename)
+        return send_from_directory(folder, doc.id_filename, as_attachment=True)
     else:
         return jsonify({"error": "Invalid filetype"}), 400
 
@@ -145,7 +144,8 @@ def create_assignment():
     if "file" in request.files:
         folder = os.path.join(app.config['UPLOAD_FOLDER_ASSIGNMENTS'], lecture_id)
         filename = save_file(request.files["file"], folder)
-        file_url = os.path.join(folder, filename)
+        # file URL points to Flask route
+        file_url = f"/uploads/assignments/{lecture_id}/assignment/{filename}"
 
     assignment = Assignment(
         lecture_id=lecture_id,
@@ -156,7 +156,7 @@ def create_assignment():
     )
     db.session.add(assignment)
     db.session.commit()
-    return jsonify({"message": "Assignment created", "id": assignment.id}), 201
+    return jsonify({"message": "Assignment created", "id": assignment.id, "file_url": file_url}), 201
 
 @app.route("/api/assignments", methods=["GET"])
 def list_assignments():
@@ -215,6 +215,7 @@ def update_submission(assignment_id):
         file = request.files["file"]
         filename = save_file(file, folder)
         metadata["file"] = filename
+        metadata["file_url"] = f"/uploads/assignments/{assignment_id}/{user_code}/{filename}"
         metadata["updated_at"] = datetime.utcnow().isoformat()
 
     if "description" in request.form:
@@ -235,6 +236,25 @@ def delete_submission(assignment_id):
         shutil.rmtree(folder)
         return jsonify({"message": f"Submission deleted for user {user_code}"})
     return jsonify({"error": "Submission not found"}), 404
+
+# ----------------
+# SERVE ASSIGNMENT FILES
+# ----------------
+# For lecture assignment files
+@app.route("/uploads/assignments/<lecture_id>/assignment/<filename>", methods=["GET"])
+def serve_lecture_assignment(lecture_id, filename):
+    folder = os.path.join(app.config['UPLOAD_FOLDER_ASSIGNMENTS'], lecture_id)
+    if not os.path.exists(os.path.join(folder, filename)):
+        return jsonify({"error": "File not found"}), 404
+    return send_from_directory(folder, filename, as_attachment=True)
+
+# For student submissions
+@app.route("/uploads/assignments/<assignment_id>/<user_code>/<filename>", methods=["GET"])
+def serve_submission_file(assignment_id, user_code, filename):
+    folder = os.path.join(app.config['UPLOAD_FOLDER_ASSIGNMENTS'], assignment_id, user_code)
+    if not os.path.exists(os.path.join(folder, filename)):
+        return jsonify({"error": "File not found"}), 404
+    return send_from_directory(folder, filename, as_attachment=True)
 
 # ----------------
 # Run App
