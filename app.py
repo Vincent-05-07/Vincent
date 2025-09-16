@@ -9,11 +9,19 @@ from flask_sqlalchemy import SQLAlchemy
 from werkzeug.utils import secure_filename
 from sqlalchemy import func
 
+from flask_cors import CORS
+
+CORS(
+    app,
+    resources={r"/*": {"origins": "http://127.0.0.1:5500"}},
+    supports_credentials=True,
+    methods=["GET","POST","PUT","PATCH","DELETE","OPTIONS"]
+)
+
 # ----------------
 # Config & App
 # ----------------
 app = Flask(__name__)
-CORS(app, supports_credentials=True)
 
 # Max upload size (50MB)
 app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024
