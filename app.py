@@ -18,7 +18,7 @@ CORS(app, supports_credentials=True)
 # Max upload size (50MB)
 app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024
 
-# Build SQLAlchemy DB URI from Neon env vars. If not provided, fallback to SQLite for local testing.
+# Build SQLAlchemy DB URI from env vars. If not provided, fallback to SQLite for local testing.
 pg_user = os.getenv("PGUSER")
 pg_pass = os.getenv("PGPASSWORD")
 pg_host = os.getenv("PGHOST")
@@ -27,7 +27,6 @@ pg_db = os.getenv("PGDATABASE")
 pg_sslmode = os.getenv("PGSSLMODE", "require")
 
 if pg_user and pg_pass and pg_host and pg_db:
-    # Note: URL-encoding special chars in credentials is recommended if needed.
     app.config['SQLALCHEMY_DATABASE_URI'] = (
         f"postgresql+psycopg2://{pg_user}:{pg_pass}@{pg_host}:{pg_port}/{pg_db}"
         f"?sslmode={pg_sslmode}"
@@ -40,7 +39,7 @@ db = SQLAlchemy(app)
 
 
 # ----------------
-# Models (Postgres/SQLite)
+# Models
 # ----------------
 class FirmImage(db.Model):
     __tablename__ = "firm_images"
@@ -71,7 +70,7 @@ class Assignment(db.Model):
     description = db.Column(db.Text)
     deadline_iso = db.Column(db.String(50))
     status = db.Column(db.String(20), default="open")
-    file_filename = db.Column(db.String(255))   # binary stored on assignments table
+    file_filename = db.Column(db.String(255))
     file_data = db.Column(db.LargeBinary)
     created_at = db.Column(db.DateTime(timezone=True), server_default=func.now())
 
@@ -87,7 +86,7 @@ class Submission(db.Model):
     updated_at = db.Column(db.DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
 
-# Create tables if they don't exist (harmless if you've manually created with SQL)
+# Create tables if they don't exist
 with app.app_context():
     db.create_all()
 
@@ -96,7 +95,6 @@ with app.app_context():
 # Helpers
 # ----------------
 def safe_filename(file_obj):
-    """Return secure filename for a FileStorage or string filename."""
     if not file_obj:
         return ""
     name = getattr(file_obj, "filename", file_obj)
@@ -119,7 +117,6 @@ def index():
 @app.route("/health", methods=["GET"])
 def health_check():
     try:
-        # Simple DB query to ensure connectivity
         db.session.execute("SELECT 1")
         return jsonify({"status": "healthy", "db": "connected"}), 200
     except Exception as e:
@@ -127,7 +124,7 @@ def health_check():
 
 
 # =========================================================
-# FIRM IMAGES (store binary in Postgres)
+# FIRM IMAGES
 # =========================================================
 @app.route("/upload-images", methods=["POST"])
 def upload_images():
@@ -139,27 +136,26 @@ def upload_images():
 
     created = []
     try:
-        for index, image_file in enumerate(images, start=1):
+        for idx, image_file in enumerate(images, start=1):
             filename = safe_filename(image_file)
             ext = os.path.splitext(filename)[1] or ".jpg"
-            filename_with_index = f"image_{index}{ext}"
+            filename_with_index = f"image_{idx}{ext}"
             file_path = f"wil-firm-pics/{user_code}/{filename_with_index}"
             data = image_file.read()
             img = FirmImage(
                 user_code=user_code,
                 file_path=file_path,
                 filename=filename_with_index,
-                image_data=data,
+                image_data=data
             )
             db.session.add(img)
-            db.session.flush()  # get id for URL
+            db.session.flush()  # ensure id
             created.append({"id": img.id, "file_path": file_path})
         db.session.commit()
 
-        base = request.host_url.rstrip("/")
-        urls = [f"{base}/serve-image/{c['id']}" for c in created]
-
-        return jsonify({"message": f"{len(created)} images saved for user {user_code}", "file_paths": urls}), 200
+        # return relative URLs (Option A)
+        urls = [f"/serve-image/{c['id']}" for c in created]
+        return jsonify({"message": f"{len(created)} images saved", "file_paths": urls}), 200
     except Exception as e:
         db.session.rollback()
         return jsonify({"error": str(e)}), 500
@@ -169,8 +165,7 @@ def upload_images():
 def get_images(user_code):
     try:
         rows = FirmImage.query.filter_by(user_code=user_code).all()
-        base = request.host_url.rstrip("/")
-        urls = [f"{base}/serve-image/{r.id}" for r in rows]
+        urls = [f"/serve-image/{r.id}" for r in rows]
         return jsonify({"user_code": user_code, "file_paths": urls}), 200
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -181,21 +176,18 @@ def serve_image(image_id):
     img = FirmImage.query.get(image_id)
     if not img:
         return jsonify({"error": "Image not found"}), 404
-
-    mime = guess_mimetype(img.filename)
-    return send_file(BytesIO(img.image_data), mimetype=mime, as_attachment=False,
-                     download_name=img.filename)
+    return send_file(BytesIO(img.image_data), mimetype=guess_mimetype(img.filename),
+                     as_attachment=False, download_name=img.filename)
 
 
 # =========================================================
-# DOCUMENTS (store CV & ID in Postgres)
+# DOCUMENTS (CV & ID)
 # =========================================================
 @app.route("/documents", methods=["POST"])
 def upload_documents():
     user_code = request.form.get("user_code")
     if not user_code or "cvFile" not in request.files or "idFile" not in request.files:
         return jsonify({"error": "user_code, CV and ID are required"}), 400
-
     try:
         cv = request.files["cvFile"]
         idf = request.files["idFile"]
@@ -204,7 +196,7 @@ def upload_documents():
             cv_filename=safe_filename(cv),
             cv_data=cv.read(),
             id_filename=safe_filename(idf),
-            id_data=idf.read(),
+            id_data=idf.read()
         )
         db.session.add(doc)
         db.session.commit()
@@ -217,15 +209,14 @@ def upload_documents():
 @app.route("/documents/<user_code>", methods=["GET"])
 def list_documents(user_code):
     docs = Document.query.filter_by(user_code=user_code).all()
-    base = request.host_url.rstrip("/")
     result = []
     for d in docs:
         result.append({
             "id": d.id,
             "cv_filename": d.cv_filename,
-            "cv_url": f"{base}/serve-document/{d.id}/cv",
+            "cv_url": f"/serve-document/{d.id}/cv",
             "id_filename": d.id_filename,
-            "id_url": f"{base}/serve-document/{d.id}/id",
+            "id_url": f"/serve-document/{d.id}/id",
             "uploaded_at": d.uploaded_at.isoformat() if d.uploaded_at else None
         })
     return jsonify(result)
@@ -278,7 +269,7 @@ def delete_document(user_code, doc_id):
 
 
 # =========================================================
-# ASSIGNMENTS (store file in assignments table as requested)
+# ASSIGNMENTS
 # =========================================================
 @app.route("/api/assignments", methods=["POST"])
 def create_assignment():
@@ -303,13 +294,26 @@ def create_assignment():
             description=description,
             deadline_iso=deadline_iso,
             file_filename=file_filename,
-            file_data=file_data,
+            file_data=file_data
         )
         db.session.add(assignment)
         db.session.commit()
-        base = request.host_url.rstrip("/")
-        file_url = f"{base}/serve-assignment-file/{assignment.id}" if file_filename else None
-        return jsonify({"message": "Assignment created", "id": assignment.id, "file_url": file_url}), 201
+
+        # return relative file_url
+        file_url = f"/serve-assignment-file/{assignment.id}" if file_filename else None
+        return jsonify({
+            "message": "Assignment created",
+            "assignment": {
+                "id": assignment.id,
+                "lecture_id": assignment.lecture_id,
+                "title": assignment.title,
+                "description": assignment.description,
+                "deadline_iso": assignment.deadline_iso,
+                "status": assignment.status,
+                "file_url": file_url,
+                "created_at": assignment.created_at.isoformat() if assignment.created_at else None
+            }
+        }), 201
     except Exception as e:
         db.session.rollback()
         return jsonify({"error": str(e)}), 500
@@ -322,7 +326,6 @@ def list_assignments():
     if lecture_id:
         query = query.filter_by(lecture_id=lecture_id)
     assignments = query.all()
-    base = request.host_url.rstrip("/")
     result = []
     for a in assignments:
         result.append({
@@ -332,10 +335,10 @@ def list_assignments():
             "description": a.description,
             "deadline_iso": a.deadline_iso,
             "status": a.status,
-            "file_url": f"{base}/serve-assignment-file/{a.id}" if a.file_filename else None,
+            "file_url": f"/serve-assignment-file/{a.id}" if a.file_filename else None,
             "created_at": a.created_at.isoformat() if a.created_at else None
         })
-    return jsonify(result)
+    return jsonify({"assignments": result})
 
 
 @app.route("/serve-assignment-file/<int:assignment_id>", methods=["GET"])
@@ -376,7 +379,7 @@ def delete_assignment(assignment_id):
 
 
 # =========================================================
-# SUBMISSIONS (store in submissions table)
+# SUBMISSIONS
 # =========================================================
 @app.route("/api/assignments/<int:assignment_id>/submissions", methods=["PUT"])
 def update_submission(assignment_id):
@@ -404,15 +407,55 @@ def update_submission(assignment_id):
             sub.file_data = data
         if description is not None:
             sub.description = description
+
+        # bump updated_at manually (DB also handles onupdate)
         sub.updated_at = datetime.utcnow()
 
         db.session.add(sub)
         db.session.commit()
 
-        return jsonify({"message": "Submission updated", "id": sub.id, "updated_at": sub.updated_at.isoformat()}), 200
+        file_url = f"/serve-submission-file/{sub.id}" if sub.filename else None
+        return jsonify({
+            "message": "Submission updated",
+            "id": sub.id,
+            "updated_at": sub.updated_at.isoformat() if sub.updated_at else None,
+            "file_url": file_url
+        }), 200
     except Exception as e:
         db.session.rollback()
         return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/assignments/<int:assignment_id>/submissions", methods=["GET"])
+def list_submissions_for_assignment(assignment_id):
+    # lists all submissions for a given assignment
+    subs = Submission.query.filter_by(assignment_id=assignment_id).all()
+    result = []
+    for s in subs:
+        result.append({
+            "id": s.id,
+            "assignment_id": s.assignment_id,
+            "user_code": s.user_code,
+            "filename": s.filename,
+            "file_url": f"/serve-submission-file/{s.id}" if s.filename else None,
+            "description": s.description,
+            "updated_at": s.updated_at.isoformat() if s.updated_at else None
+        })
+    return jsonify({"submissions": result})
+
+
+@app.route("/api/submissions/<int:submission_id>", methods=["GET"])
+def get_submission(submission_id):
+    s = Submission.query.get_or_404(submission_id)
+    return jsonify({
+        "id": s.id,
+        "assignment_id": s.assignment_id,
+        "user_code": s.user_code,
+        "filename": s.filename,
+        "file_url": f"/serve-submission-file/{s.id}" if s.filename else None,
+        "description": s.description,
+        "updated_at": s.updated_at.isoformat() if s.updated_at else None
+    })
 
 
 @app.route("/api/assignments/<int:assignment_id>/submissions", methods=["DELETE"])
