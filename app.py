@@ -13,6 +13,7 @@ from flask_cors import CORS, cross_origin
 # Flask App
 # ----------------
 app = Flask(__name__)
+CORS(app)
 
 # ----------------
 # Config
