@@ -72,7 +72,7 @@ class Document(db.Model):
 
 class Assignment(db.Model):
     __tablename__ = "assignments"
-    id = db.Column(db.Integer, primary_key=True)
+    id = db.Column(db.String(50), primary_key=True)
     lecture_id = db.Column(db.String(50), index=True, nullable=False)
     title = db.Column(db.String(255), nullable=False)
     description = db.Column(db.Text)
@@ -85,7 +85,7 @@ class Assignment(db.Model):
 class Submission(db.Model):
     __tablename__ = "submissions"
     id = db.Column(db.Integer, primary_key=True)
-    assignment_id = db.Column(db.Integer, db.ForeignKey("assignments.id"), nullable=False)
+    assignment_id = db.Column(db.String(50), nullable=False, index=True)
     user_code = db.Column(db.String(50), nullable=False, index=True)
     filename = db.Column(db.String(255))
     file_data = db.Column(db.LargeBinary)
@@ -241,7 +241,9 @@ def create_assignment():
             f = request.files["file"]
             file_filename = safe_filename(f)
             file_data = f.read()
+        assignment_id = request.form.get("id") or str(int(datetime.utcnow().timestamp()*1000))
         assignment = Assignment(
+            id=assignment_id,
             lecture_id=lecture_id,
             title=title,
             description=description,
@@ -290,7 +292,7 @@ def list_assignments():
         })
     return jsonify({"assignments": result})
 
-@app.route("/serve-assignment-file/<int:assignment_id>", methods=["GET"])
+@app.route("/serve-assignment-file/<assignment_id>", methods=["GET"])
 def serve_assignment_file(assignment_id):
     a = Assignment.query.get(assignment_id)
     if not a or not a.file_data:
@@ -301,8 +303,10 @@ def serve_assignment_file(assignment_id):
 # ----------------
 # SUBMISSIONS
 # ----------------
-@app.route("/api/assignments/<int:assignment_id>/submissions", methods=["PUT"])
+@app.route("/api/assignments/<assignment_id>/submissions", methods=["PUT", "OPTIONS"])
 def update_submission(assignment_id):
+    if request.method == "OPTIONS":
+        return "", 200
     user_code = request.form.get("user_code")
     if not user_code:
         return jsonify({"error": "user_code required"}), 400
@@ -331,7 +335,7 @@ def update_submission(assignment_id):
         db.session.rollback()
         return jsonify({"error": str(e)}), 500
 
-@app.route("/api/assignments/<int:assignment_id>/submissions", methods=["GET"])
+@app.route("/api/assignments/<assignment_id>/submissions", methods=["GET"])
 def list_submissions_for_assignment(assignment_id):
     subs = Submission.query.filter_by(assignment_id=assignment_id).all()
     result = []
@@ -346,6 +350,22 @@ def list_submissions_for_assignment(assignment_id):
             "updated_at": s.updated_at.isoformat() if s.updated_at else None
         })
     return jsonify({"submissions": result})
+
+@app.route("/api/assignments/<assignment_id>/submissions", methods=["DELETE"])
+def delete_submission(assignment_id):
+    user_code = request.args.get("user_code")
+    if not user_code:
+        return jsonify({"error": "user_code required"}), 400
+    sub = Submission.query.filter_by(assignment_id=assignment_id, user_code=user_code).first()
+    if not sub:
+        return jsonify({"error": "Submission not found"}), 404
+    try:
+        db.session.delete(sub)
+        db.session.commit()
+        return jsonify({"message": f"Submission deleted for user {user_code}"}), 200
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({"error": str(e)}), 500
 
 @app.route("/serve-submission-file/<int:submission_id>", methods=["GET"])
 def serve_submission_file(submission_id):
