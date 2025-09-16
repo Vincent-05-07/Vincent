@@ -30,9 +30,6 @@ def ensure_folder(folder):
 # ------------------ CREATE ------------------
 @app.route("/upload/<file_type>", methods=["POST"])
 def upload_file(file_type):
-    """
-    Upload a new file for a given type (assignments, submissions, cv, id, images).
-    """
     if "file" not in request.files:
         return jsonify({"error": "No file part"}), 400
 
@@ -56,9 +53,6 @@ def upload_file(file_type):
 # ------------------ READ ------------------
 @app.route("/files/<file_type>", methods=["GET"])
 def list_files(file_type):
-    """
-    List all files of a given type.
-    """
     folder = os.path.join(app.config["UPLOAD_FOLDER"], file_type)
     if not os.path.exists(folder):
         return jsonify([])
@@ -68,9 +62,6 @@ def list_files(file_type):
 
 @app.route("/files/<file_type>/<filename>", methods=["GET"])
 def get_file(file_type, filename):
-    """
-    Retrieve (download/serve) a file.
-    """
     folder = os.path.join(app.config["UPLOAD_FOLDER"], file_type)
     if not os.path.exists(os.path.join(folder, filename)):
         return jsonify({"error": "File not found"}), 404
@@ -80,9 +71,6 @@ def get_file(file_type, filename):
 # ------------------ UPDATE ------------------
 @app.route("/update/<file_type>/<filename>", methods=["PUT"])
 def update_file(file_type, filename):
-    """
-    Replace an existing file with a new one.
-    """
     folder = os.path.join(app.config["UPLOAD_FOLDER"], file_type)
     old_file_path = os.path.join(folder, filename)
 
@@ -97,14 +85,10 @@ def update_file(file_type, filename):
         return jsonify({"error": "No selected file"}), 400
 
     if file and allowed_file(file.filename):
-        # Remove old file
         os.remove(old_file_path)
-
-        # Save new file
         new_filename = secure_filename(file.filename)
         new_file_path = os.path.join(folder, new_filename)
         file.save(new_file_path)
-
         return jsonify({
             "message": f"{file_type.capitalize()} updated successfully",
             "new_path": new_file_path
@@ -116,9 +100,6 @@ def update_file(file_type, filename):
 # ------------------ DELETE ------------------
 @app.route("/delete/<file_type>/<filename>", methods=["DELETE"])
 def delete_file(file_type, filename):
-    """
-    Delete a file from a given type folder.
-    """
     folder = os.path.join(app.config["UPLOAD_FOLDER"], file_type)
     file_path = os.path.join(folder, filename)
 
