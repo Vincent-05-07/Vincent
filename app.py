@@ -7,19 +7,12 @@ from flask import Flask, request, jsonify, send_file
 from flask_sqlalchemy import SQLAlchemy
 from werkzeug.utils import secure_filename
 from sqlalchemy import func
-from flask_cors import CORS
+from flask_cors import CORS, cross_origin
 
 # ----------------
 # Flask App
 # ----------------
 app = Flask(__name__)
-
-# ----------------
-# CORS
-# ----------------
-CORS(
-    app
-)
 
 # ----------------
 # Config
@@ -43,6 +36,18 @@ else:
 
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 db = SQLAlchemy(app)
+
+# ----------------
+# CORS
+# ----------------
+# Use a more robust CORS configuration that explicitly supports credentials
+# and sets allowed methods.
+CORS(
+    app,
+    supports_credentials=True,
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["Content-Type", "Authorization", "X-Requested-With"]
+)
 
 # ----------------
 # Models
@@ -124,6 +129,7 @@ def health_check():
 # FIRM IMAGES
 # ----------------
 @app.route("/upload-images", methods=["POST", "OPTIONS"])
+@cross_origin()
 def upload_images():
     if request.method == "OPTIONS":
         return "", 200
@@ -171,6 +177,7 @@ def serve_image(image_id):
 # DOCUMENTS (CV & ID)
 # ----------------
 @app.route("/documents", methods=["POST", "OPTIONS"])
+@cross_origin()
 def upload_documents():
     if request.method == "OPTIONS":
         return "", 200
@@ -226,8 +233,11 @@ def serve_document(doc_id, filetype):
 # ----------------
 # ASSIGNMENTS
 # ----------------
-@app.route("/api/assignments", methods=["POST"])
+@app.route("/api/assignments", methods=["POST", "OPTIONS"])
+@cross_origin()
 def create_assignment():
+    if request.method == "OPTIONS":
+        return "", 200
     lecture_id = request.form.get("lecture_id")
     title = request.form.get("title")
     deadline_iso = request.form.get("deadline_iso")
@@ -304,6 +314,7 @@ def serve_assignment_file(assignment_id):
 # SUBMISSIONS
 # ----------------
 @app.route("/api/assignments/<assignment_id>/submissions", methods=["PUT", "OPTIONS"])
+@cross_origin()
 def update_submission(assignment_id):
     if request.method == "OPTIONS":
         return "", 200
