@@ -129,26 +129,6 @@ def delete_file(file_type, filename):
     return jsonify({"message": f"{file_type.capitalize()} deleted successfully"}), 200
 
 
-# ------------------ NEW: GET IMAGES ------------------
-@app.route("/get-images/<user_code>", methods=["GET"])
-def get_images(user_code):
-    """
-    Return all images uploaded for a given user_code.
-    Files are expected inside: uploads/images/<user_code>/
-    """
-    folder = os.path.join(app.config["UPLOAD_FOLDER"], "images", user_code)
-
-    if not os.path.exists(folder):
-        return jsonify({"file_paths": []})  # No images yet
-
-    files = [f for f in os.listdir(folder) if allowed_file(f)]
-    file_paths = [
-        request.host_url.rstrip("/") + f"/files/images/{user_code}/{f}"
-        for f in files
-    ]
-    return jsonify({"file_paths": file_paths})
-
-
 # ------------------ RUN ------------------
 if __name__ == "__main__":
     app.run(debug=True, host="0.0.0.0", port=5000)
