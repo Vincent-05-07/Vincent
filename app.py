@@ -396,8 +396,12 @@ def delete_assignment(assignment_id):
 # =========================================================
 # SUBMISSIONS
 # =========================================================
-@app.route("/api/assignments/<int:assignment_id>/submissions", methods=["PUT"])
+@app.route("/api/assignments/<int:assignment_id>/submissions", methods=["PUT", "OPTIONS"])
 def update_submission(assignment_id):
+    if request.method == "OPTIONS":
+        # Handle preflight CORS request
+        return "", 200
+
     user_code = request.form.get("user_code")
     if not user_code:
         return jsonify({"error": "user_code required"}), 400
@@ -423,7 +427,6 @@ def update_submission(assignment_id):
         if description is not None:
             sub.description = description
 
-        # bump updated_at manually (DB also handles onupdate)
         sub.updated_at = datetime.utcnow()
 
         db.session.add(sub)
