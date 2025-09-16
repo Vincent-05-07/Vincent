@@ -177,6 +177,19 @@ def update_image(user_code, filename):
         return jsonify({"message":f"Image {filename} updated for user {user_code}"}),200
     except Exception as e: return jsonify({"error":str(e)}),500
 
+@app.route('/get-image/<user_code>/<filename>', methods=['GET'])
+def get_image(user_code, filename):
+    try:
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute("SELECT image_data FROM firm_images WHERE user_code=%s AND file_path LIKE %s", (user_code, f"%{filename}"))
+        row = cur.fetchone()
+        cur.close(); conn.close()
+        if not row:
+            return jsonify({"error": "Image not found"}), 404
+        return Response(row[0], mimetype='image/jpeg')  # Adjust MIME type as needed
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 @app.route('/delete-image/<user_code>/<filename>', methods=['DELETE'])
 def delete_image(user_code, filename):
     try:
