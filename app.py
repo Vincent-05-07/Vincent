@@ -11,6 +11,9 @@ from sqlalchemy import func
 
 from flask_cors import CORS
 app = Flask(__name__)
+# ----------------
+# Config & App
+# ----------------
 
 CORS(
     app,
@@ -18,10 +21,6 @@ CORS(
     supports_credentials=True,
     methods=["GET","POST","PUT","PATCH","DELETE","OPTIONS"]
 )
-
-# ----------------
-# Config & App
-# ----------------
 
 # Max upload size (50MB)
 app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024
