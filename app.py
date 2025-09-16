@@ -127,8 +127,10 @@ def health_check():
 # ----------------
 # FIRM IMAGES
 # ----------------
-@app.route("/upload-images", methods=["POST"])
+@app.route("/upload-images", methods=["POST", "OPTIONS"])
 def upload_images():
+    if request.method == "OPTIONS":
+        return "", 200
     user_code = request.form.get("user_code")
     images = request.files.getlist("images")
     if not user_code or not images:
@@ -172,8 +174,10 @@ def serve_image(image_id):
 # ----------------
 # DOCUMENTS (CV & ID)
 # ----------------
-@app.route("/documents", methods=["POST"])
+@app.route("/documents", methods=["POST", "OPTIONS"])
 def upload_documents():
+    if request.method == "OPTIONS":
+        return "", 200
     user_code = request.form.get("user_code")
     if not user_code or "cvFile" not in request.files or "idFile" not in request.files:
         return jsonify({"error": "user_code, CV and ID are required"}), 400
