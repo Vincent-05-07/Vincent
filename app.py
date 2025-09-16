@@ -1,6 +1,4 @@
 import os
-import json
-import shutil
 import mimetypes
 from datetime import datetime
 from io import BytesIO
@@ -9,6 +7,7 @@ from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS
 from flask_sqlalchemy import SQLAlchemy
 from werkzeug.utils import secure_filename
+from sqlalchemy import func
 
 # ----------------
 # Config & App
@@ -41,7 +40,7 @@ db = SQLAlchemy(app)
 
 
 # ----------------
-# Models (Postgres)
+# Models (Postgres/SQLite)
 # ----------------
 class FirmImage(db.Model):
     __tablename__ = "firm_images"
@@ -50,7 +49,7 @@ class FirmImage(db.Model):
     file_path = db.Column(db.String(255), nullable=False)
     filename = db.Column(db.String(255), nullable=False)
     image_data = db.Column(db.LargeBinary, nullable=False)
-    uploaded_at = db.Column(db.DateTime, default=datetime.utcnow)
+    uploaded_at = db.Column(db.DateTime(timezone=True), server_default=func.now())
 
 
 class Document(db.Model):
@@ -61,7 +60,7 @@ class Document(db.Model):
     cv_data = db.Column(db.LargeBinary, nullable=False)
     id_filename = db.Column(db.String(255), nullable=False)
     id_data = db.Column(db.LargeBinary, nullable=False)
-    uploaded_at = db.Column(db.DateTime, default=datetime.utcnow)
+    uploaded_at = db.Column(db.DateTime(timezone=True), server_default=func.now())
 
 
 class Assignment(db.Model):
@@ -72,9 +71,9 @@ class Assignment(db.Model):
     description = db.Column(db.Text)
     deadline_iso = db.Column(db.String(50))
     status = db.Column(db.String(20), default="open")
-    file_filename = db.Column(db.String(255))
+    file_filename = db.Column(db.String(255))   # binary stored on assignments table
     file_data = db.Column(db.LargeBinary)
-    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    created_at = db.Column(db.DateTime(timezone=True), server_default=func.now())
 
 
 class Submission(db.Model):
@@ -85,9 +84,10 @@ class Submission(db.Model):
     filename = db.Column(db.String(255))
     file_data = db.Column(db.LargeBinary)
     description = db.Column(db.Text)
-    updated_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
 
+# Create tables if they don't exist (harmless if you've manually created with SQL)
 with app.app_context():
     db.create_all()
 
@@ -95,8 +95,12 @@ with app.app_context():
 # ----------------
 # Helpers
 # ----------------
-def safe_filename(file):
-    return secure_filename(file.filename)
+def safe_filename(file_obj):
+    """Return secure filename for a FileStorage or string filename."""
+    if not file_obj:
+        return ""
+    name = getattr(file_obj, "filename", file_obj)
+    return secure_filename(name or "")
 
 
 def guess_mimetype(filename):
@@ -137,12 +141,14 @@ def upload_images():
     try:
         for index, image_file in enumerate(images, start=1):
             filename = safe_filename(image_file)
-            file_path = f"wil-firm-pics/{user_code}/image_{index}{os.path.splitext(filename)[1] or '.jpg'}"
+            ext = os.path.splitext(filename)[1] or ".jpg"
+            filename_with_index = f"image_{index}{ext}"
+            file_path = f"wil-firm-pics/{user_code}/{filename_with_index}"
             data = image_file.read()
             img = FirmImage(
                 user_code=user_code,
                 file_path=file_path,
-                filename=os.path.basename(file_path),
+                filename=filename_with_index,
                 image_data=data,
             )
             db.session.add(img)
@@ -220,7 +226,7 @@ def list_documents(user_code):
             "cv_url": f"{base}/serve-document/{d.id}/cv",
             "id_filename": d.id_filename,
             "id_url": f"{base}/serve-document/{d.id}/id",
-            "uploaded_at": d.uploaded_at.isoformat()
+            "uploaded_at": d.uploaded_at.isoformat() if d.uploaded_at else None
         })
     return jsonify(result)
 
@@ -272,7 +278,7 @@ def delete_document(user_code, doc_id):
 
 
 # =========================================================
-# ASSIGNMENTS (store file in Postgres)
+# ASSIGNMENTS (store file in assignments table as requested)
 # =========================================================
 @app.route("/api/assignments", methods=["POST"])
 def create_assignment():
@@ -327,7 +333,7 @@ def list_assignments():
             "deadline_iso": a.deadline_iso,
             "status": a.status,
             "file_url": f"{base}/serve-assignment-file/{a.id}" if a.file_filename else None,
-            "created_at": a.created_at.isoformat()
+            "created_at": a.created_at.isoformat() if a.created_at else None
         })
     return jsonify(result)
 
@@ -370,7 +376,7 @@ def delete_assignment(assignment_id):
 
 
 # =========================================================
-# SUBMISSIONS (store in Postgres)
+# SUBMISSIONS (store in submissions table)
 # =========================================================
 @app.route("/api/assignments/<int:assignment_id>/submissions", methods=["PUT"])
 def update_submission(assignment_id):
@@ -403,7 +409,7 @@ def update_submission(assignment_id):
         db.session.add(sub)
         db.session.commit()
 
-        return jsonify({"message": "Submission updated", "id": sub.id, "updated_at": sub.updated_at.isoformat()})
+        return jsonify({"message": "Submission updated", "id": sub.id, "updated_at": sub.updated_at.isoformat()}), 200
     except Exception as e:
         db.session.rollback()
         return jsonify({"error": str(e)}), 500
@@ -421,7 +427,7 @@ def delete_submission(assignment_id):
     try:
         db.session.delete(sub)
         db.session.commit()
-        return jsonify({"message": f"Submission deleted for user {user_code}"})
+        return jsonify({"message": f"Submission deleted for user {user_code}"}), 200
     except Exception as e:
         db.session.rollback()
         return jsonify({"error": str(e)}), 500
