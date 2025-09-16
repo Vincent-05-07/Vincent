@@ -18,11 +18,7 @@ app = Flask(__name__)
 # CORS
 # ----------------
 CORS(
-    app,
-    origins=["http://127.0.0.1:5500", "https://project-connect-x4ei.onrender.com"],
-    supports_credentials=True,
-    methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allow_headers=["Content-Type", "Authorization"]
+    app
 )
 
 # ----------------
