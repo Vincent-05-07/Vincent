@@ -8,10 +8,9 @@ app = Flask(__name__)
 UPLOAD_FOLDER = "uploads"
 app.config["UPLOAD_FOLDER"] = UPLOAD_FOLDER
 
-# Allowed extensions (can be extended)
+# Allowed extensions (you can extend this list)
 ALLOWED_EXTENSIONS = {"pdf", "png", "jpg", "jpeg", "docx", "txt"}
 
-# Ensure root uploads folder exists
 if not os.path.exists(UPLOAD_FOLDER):
     os.makedirs(UPLOAD_FOLDER)
 
@@ -27,12 +26,9 @@ def ensure_folder(folder):
     return path
 
 
-# ------------------ CREATE ------------------
+# --- CREATE ---
 @app.route("/upload/<file_type>", methods=["POST"])
 def upload_file(file_type):
-    """
-    Upload a new file for a given type (assignments, submissions, cv, id, images).
-    """
     if "file" not in request.files:
         return jsonify({"error": "No file part"}), 400
 
@@ -45,20 +41,14 @@ def upload_file(file_type):
         folder = ensure_folder(file_type)
         filepath = os.path.join(folder, filename)
         file.save(filepath)
-        return jsonify({
-            "message": f"{file_type.capitalize()} uploaded successfully",
-            "path": filepath
-        }), 201
+        return jsonify({"message": f"{file_type.capitalize()} uploaded successfully", "path": filepath}), 201
 
     return jsonify({"error": "File type not allowed"}), 400
 
 
-# ------------------ READ ------------------
+# --- READ ---
 @app.route("/files/<file_type>", methods=["GET"])
 def list_files(file_type):
-    """
-    List all files of a given type.
-    """
     folder = os.path.join(app.config["UPLOAD_FOLDER"], file_type)
     if not os.path.exists(folder):
         return jsonify([])
@@ -68,21 +58,13 @@ def list_files(file_type):
 
 @app.route("/files/<file_type>/<filename>", methods=["GET"])
 def get_file(file_type, filename):
-    """
-    Retrieve (download/serve) a file.
-    """
     folder = os.path.join(app.config["UPLOAD_FOLDER"], file_type)
-    if not os.path.exists(os.path.join(folder, filename)):
-        return jsonify({"error": "File not found"}), 404
     return send_from_directory(folder, filename)
 
 
-# ------------------ UPDATE ------------------
+# --- UPDATE ---
 @app.route("/update/<file_type>/<filename>", methods=["PUT"])
 def update_file(file_type, filename):
-    """
-    Replace an existing file with a new one.
-    """
     folder = os.path.join(app.config["UPLOAD_FOLDER"], file_type)
     old_file_path = os.path.join(folder, filename)
 
@@ -97,28 +79,19 @@ def update_file(file_type, filename):
         return jsonify({"error": "No selected file"}), 400
 
     if file and allowed_file(file.filename):
-        # Remove old file
+        # Replace old file with new one
         os.remove(old_file_path)
-
-        # Save new file
         new_filename = secure_filename(file.filename)
         new_file_path = os.path.join(folder, new_filename)
         file.save(new_file_path)
-
-        return jsonify({
-            "message": f"{file_type.capitalize()} updated successfully",
-            "new_path": new_file_path
-        }), 200
+        return jsonify({"message": f"{file_type.capitalize()} updated successfully", "new_path": new_file_path}), 200
 
     return jsonify({"error": "File type not allowed"}), 400
 
 
-# ------------------ DELETE ------------------
+# --- DELETE ---
 @app.route("/delete/<file_type>/<filename>", methods=["DELETE"])
 def delete_file(file_type, filename):
-    """
-    Delete a file from a given type folder.
-    """
     folder = os.path.join(app.config["UPLOAD_FOLDER"], file_type)
     file_path = os.path.join(folder, filename)
 
@@ -129,6 +102,6 @@ def delete_file(file_type, filename):
     return jsonify({"message": f"{file_type.capitalize()} deleted successfully"}), 200
 
 
-# ------------------ RUN ------------------
+# --- Run ---
 if __name__ == "__main__":
-    app.run(debug=True, host="0.0.0.0", port=5000)
+    app.run(debug=True)
