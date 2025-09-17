@@ -1,9 +1,10 @@
+# app.py  (full updated Flask app)
 import os
 import mimetypes
 from datetime import datetime
 from io import BytesIO
 
-from flask import Flask, request, jsonify, send_file
+from flask import Flask, request, jsonify, send_file, send_from_directory, current_app
 from flask_sqlalchemy import SQLAlchemy
 from werkzeug.utils import secure_filename
 from sqlalchemy import func
@@ -13,13 +14,18 @@ from flask_cors import CORS, cross_origin
 # Flask App
 # ----------------
 app = Flask(__name__)
-CORS(app, supports_credentials=True, origins="*")
-
 
 # ----------------
 # Config
 # ----------------
+# Max upload size (50MB)
 app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024  # 50 MB max
+
+# Upload directory (can set via env)
+BASE_DIR = os.path.abspath(os.path.dirname(__file__))
+DEFAULT_UPLOAD_DIR = os.getenv("UPLOAD_DIR", os.path.join(BASE_DIR, "uploads", "documents"))
+os.makedirs(DEFAULT_UPLOAD_DIR, exist_ok=True)
+app.config['UPLOAD_DIR'] = DEFAULT_UPLOAD_DIR
 
 # PostgreSQL config from env or fallback to SQLite
 pg_user = os.getenv("PGUSER")
@@ -42,11 +48,11 @@ db = SQLAlchemy(app)
 # ----------------
 # CORS
 # ----------------
-# Use a more robust CORS configuration that explicitly supports credentials
-# and sets allowed methods.
+# You previously used origins="*". keep it permissive (JS removed credentials).
 CORS(
     app,
     supports_credentials=True,
+    origins="*",
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["Content-Type", "Authorization", "X-Requested-With"]
 )
@@ -60,17 +66,18 @@ class FirmImage(db.Model):
     user_code = db.Column(db.String(50), index=True, nullable=False)
     file_path = db.Column(db.String(255), nullable=False)
     filename = db.Column(db.String(255), nullable=False)
-    image_data = db.Column(db.LargeBinary, nullable=False)
+    image_data = db.Column(db.LargeBinary)  # legacy / optional
     uploaded_at = db.Column(db.DateTime(timezone=True), server_default=func.now())
 
 class Document(db.Model):
     __tablename__ = "documents"
     id = db.Column(db.Integer, primary_key=True)
     user_code = db.Column(db.String(50), index=True, nullable=False)
-    cv_filename = db.Column(db.String(255), nullable=False)
-    cv_data = db.Column(db.LargeBinary, nullable=False)
-    id_filename = db.Column(db.String(255), nullable=False)
-    id_data = db.Column(db.LargeBinary, nullable=False)
+    # file metadata stored on disk; DB stores filenames and relative paths
+    cv_filename = db.Column(db.String(255), nullable=True)
+    cv_path = db.Column(db.String(1024), nullable=True)
+    id_filename = db.Column(db.String(255), nullable=True)
+    id_path = db.Column(db.String(1024), nullable=True)
     uploaded_at = db.Column(db.DateTime(timezone=True), server_default=func.now())
 
 class Assignment(db.Model):
@@ -82,7 +89,7 @@ class Assignment(db.Model):
     deadline_iso = db.Column(db.String(50))
     status = db.Column(db.String(20), default="open")
     file_filename = db.Column(db.String(255))
-    file_data = db.Column(db.LargeBinary)
+    file_data = db.Column(db.LargeBinary)  # still binary for assignments (you can migrate later)
     created_at = db.Column(db.DateTime(timezone=True), server_default=func.now())
 
 class Submission(db.Model):
@@ -112,6 +119,36 @@ def guess_mimetype(filename):
     mime, _ = mimetypes.guess_type(filename)
     return mime or "application/octet-stream"
 
+def user_upload_folder(user_code):
+    # Return absolute directory where this user's files should be stored
+    folder = os.path.join(app.config['UPLOAD_DIR'], str(user_code))
+    os.makedirs(folder, exist_ok=True)
+    return folder
+
+def save_file_to_disk(file_obj, user_code, role_hint=None):
+    """
+    Save uploaded file object to disk under user's folder.
+    role_hint used only for filename prefix. Returns (filename, relative_path).
+    """
+    filename = safe_filename(file_obj)
+    # prepend timestamp to avoid collisions
+    timestamp = datetime.utcnow().strftime("%Y%m%d%H%M%S%f")
+    prefix = (role_hint + "_") if role_hint else ""
+    stored_name = f"{prefix}{timestamp}_{filename}"
+    folder = user_upload_folder(user_code)
+    full_path = os.path.join(folder, stored_name)
+    # save stream to disk
+    file_obj.stream.seek(0)
+    file_obj.save(full_path)
+    # store paths relative to upload dir (so easy to move upload dir if needed)
+    rel_path = os.path.relpath(full_path, app.config['UPLOAD_DIR'])
+    return stored_name, rel_path  # filename, relative path
+
+def make_file_url_from_relpath(relpath):
+    # relpath is relative to UPLOAD_DIR; create API URL to serve it
+    # route: /serve-document-by-path/<path:relpath>
+    return f"/serve-document-by-path/{relpath}"
+
 # ----------------
 # Root + Health
 # ----------------
@@ -128,7 +165,7 @@ def health_check():
         return jsonify({"status": "unhealthy", "error": str(e)}), 500
 
 # ----------------
-# FIRM IMAGES
+# FIRM IMAGES (unchanged)
 # ----------------
 @app.route("/upload-images", methods=["POST", "OPTIONS"])
 @cross_origin()
@@ -176,32 +213,100 @@ def serve_image(image_id):
                      as_attachment=False, download_name=img.filename)
 
 # ----------------
-# DOCUMENTS (CV & ID)
+# DOCUMENTS (CV & ID) - updated to disk-backed storage
 # ----------------
 @app.route("/documents", methods=["POST", "OPTIONS"])
 @cross_origin()
 def upload_documents():
+    """
+    Supports:
+    - Both files: 'cvFile' and 'idFile' -> saves both, creates new DB row
+    - Single file: 'file' with form 'file_type'='cv'|'id' -> saves/updates DB row for user
+    - Single file: 'file' without file_type -> server will attempt to infer by mime/type (image -> id, doc/pdf -> cv)
+    """
     if request.method == "OPTIONS":
         return "", 200
+
     user_code = request.form.get("user_code")
-    if not user_code or "cvFile" not in request.files or "idFile" not in request.files:
-        return jsonify({"error": "user_code, CV and ID are required"}), 400
-    try:
-        cv = request.files["cvFile"]
-        idf = request.files["idFile"]
-        doc = Document(
-            user_code=user_code,
-            cv_filename=safe_filename(cv),
-            cv_data=cv.read(),
-            id_filename=safe_filename(idf),
-            id_data=idf.read()
-        )
-        db.session.add(doc)
-        db.session.commit()
-        return jsonify({"message": "Documents uploaded", "id": doc.id}), 201
-    except Exception as e:
-        db.session.rollback()
-        return jsonify({"error": str(e)}), 500
+    if not user_code:
+        return jsonify({"error": "user_code is required"}), 400
+
+    # Mode 1: both files provided
+    if "cvFile" in request.files and "idFile" in request.files:
+        try:
+            cv = request.files["cvFile"]
+            idf = request.files["idFile"]
+
+            cv_name, cv_rel = save_file_to_disk(cv, user_code, role_hint="cv")
+            id_name, id_rel = save_file_to_disk(idf, user_code, role_hint="id")
+
+            doc = Document(
+                user_code=user_code,
+                cv_filename=cv_name,
+                cv_path=cv_rel,
+                id_filename=id_name,
+                id_path=id_rel
+            )
+            db.session.add(doc)
+            db.session.commit()
+
+            return jsonify({
+                "message": "Both documents uploaded",
+                "id": doc.id,
+                "cv_url": make_file_url_from_relpath(doc.cv_path),
+                "id_url": make_file_url_from_relpath(doc.id_path)
+            }), 201
+
+        except Exception as e:
+            db.session.rollback()
+            return jsonify({"error": str(e)}), 500
+
+    # Mode 2: single upload (generic 'file')
+    if "file" in request.files:
+        file_obj = request.files["file"]
+        file_type = (request.form.get("file_type") or request.form.get("type") or "").lower().strip()  # 'cv' or 'id' preferred
+
+        # Try to infer if no explicit file_type
+        if not file_type:
+            mim = guess_mimetype(safe_filename(file_obj))
+            if mim.startswith("image/"):
+                file_type = "id"
+            else:
+                # treat documents (pdf/doc) as cv by default
+                file_type = "cv"
+
+        try:
+            role_hint = "cv" if file_type == "cv" else "id"
+            saved_name, saved_rel = save_file_to_disk(file_obj, user_code, role_hint=role_hint)
+
+            # try to find existing Document for user that is missing the counterpart
+            doc = Document.query.filter_by(user_code=user_code).order_by(Document.uploaded_at.desc()).first()
+
+            if not doc:
+                # create new document row with only this file set
+                doc = Document(user_code=user_code)
+            if file_type == "cv":
+                doc.cv_filename = saved_name
+                doc.cv_path = saved_rel
+            else:
+                doc.id_filename = saved_name
+                doc.id_path = saved_rel
+
+            db.session.add(doc)
+            db.session.commit()
+
+            return jsonify({
+                "message": f"{file_type.upper()} uploaded",
+                "id": doc.id,
+                "file_role": file_type,
+                "file_url": make_file_url_from_relpath(saved_rel)
+            }), 201
+        except Exception as e:
+            db.session.rollback()
+            return jsonify({"error": str(e)}), 500
+
+    # If we reach here, no file params were found
+    return jsonify({"error": "No files provided. Expect cvFile+idFile or single 'file'."}), 400
 
 @app.route("/documents/<user_code>", methods=["GET"])
 def list_documents(user_code):
@@ -211,29 +316,61 @@ def list_documents(user_code):
         result.append({
             "id": d.id,
             "cv_filename": d.cv_filename,
-            "cv_url": f"/serve-document/{d.id}/cv",
+            "cv_url": make_file_url_from_relpath(d.cv_path) if d.cv_path else None,
             "id_filename": d.id_filename,
-            "id_url": f"/serve-document/{d.id}/id",
+            "id_url": make_file_url_from_relpath(d.id_path) if d.id_path else None,
             "uploaded_at": d.uploaded_at.isoformat() if d.uploaded_at else None
         })
     return jsonify(result)
 
 @app.route("/serve-document/<int:doc_id>/<string:filetype>", methods=["GET"])
 def serve_document(doc_id, filetype):
+    """
+    Legacy endpoint: serves the requested file for a Document record.
+    filetype: 'cv' or 'id'
+    """
     doc = Document.query.get(doc_id)
     if not doc:
         return jsonify({"error": "Document not found"}), 404
+
     if filetype == "cv":
-        return send_file(BytesIO(doc.cv_data), mimetype=guess_mimetype(doc.cv_filename),
-                         as_attachment=True, download_name=doc.cv_filename)
+        if not doc.cv_path:
+            return jsonify({"error": "CV not found"}), 404
+        abs_path = os.path.join(app.config['UPLOAD_DIR'], doc.cv_path)
+        if not os.path.exists(abs_path):
+            return jsonify({"error": "CV file missing on server"}), 404
+        return send_file(abs_path, mimetype=guess_mimetype(doc.cv_filename), as_attachment=True, download_name=doc.cv_filename)
+
     elif filetype == "id":
-        return send_file(BytesIO(doc.id_data), mimetype=guess_mimetype(doc.id_filename),
-                         as_attachment=True, download_name=doc.id_filename)
+        if not doc.id_path:
+            return jsonify({"error": "ID not found"}), 404
+        abs_path = os.path.join(app.config['UPLOAD_DIR'], doc.id_path)
+        if not os.path.exists(abs_path):
+            return jsonify({"error": "ID file missing on server"}), 404
+        return send_file(abs_path, mimetype=guess_mimetype(doc.id_filename), as_attachment=True, download_name=doc.id_filename)
     else:
         return jsonify({"error": "Invalid filetype"}), 400
 
+@app.route("/serve-document-by-path/<path:relpath>", methods=["GET"])
+def serve_document_by_path(relpath):
+    """
+    Serve a file by its relative path under UPLOAD_DIR.
+    This lets the frontend use the path returned by list_documents or upload responses.
+    """
+    # Normalize path for security
+    safe_rel = os.path.normpath(relpath)
+    # Prevent path traversal
+    if safe_rel.startswith(".."):
+        return jsonify({"error": "Invalid path"}), 400
+    abs_path = os.path.join(app.config['UPLOAD_DIR'], safe_rel)
+    if not os.path.exists(abs_path):
+        return jsonify({"error": "File not found"}), 404
+    # Derive filename from path
+    filename = os.path.basename(abs_path)
+    return send_file(abs_path, mimetype=guess_mimetype(filename), as_attachment=True, download_name=filename)
+
 # ----------------
-# ASSIGNMENTS
+# ASSIGNMENTS (unchanged)
 # ----------------
 @app.route("/api/assignments", methods=["POST", "OPTIONS"])
 @cross_origin()
@@ -313,7 +450,7 @@ def serve_assignment_file(assignment_id):
                      as_attachment=True, download_name=a.file_filename)
 
 # ----------------
-# SUBMISSIONS
+# SUBMISSIONS (unchanged)
 # ----------------
 @app.route("/api/assignments/<assignment_id>/submissions", methods=["PUT", "OPTIONS"])
 @cross_origin()
