@@ -15,6 +15,7 @@ from flask_cors import CORS, cross_origin
 app = Flask(__name__)
 CORS(app, supports_credentials=True, origins="*")
 
+
 # ----------------
 # Config
 # ----------------
@@ -37,6 +38,18 @@ else:
 
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 db = SQLAlchemy(app)
+
+# ----------------
+# CORS
+# ----------------
+# Use a more robust CORS configuration that explicitly supports credentials
+# and sets allowed methods.
+CORS(
+    app,
+    supports_credentials=True,
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["Content-Type", "Authorization", "X-Requested-With"]
+)
 
 # ----------------
 # Models
@@ -75,16 +88,12 @@ class Assignment(db.Model):
 class Submission(db.Model):
     __tablename__ = "submissions"
     id = db.Column(db.Integer, primary_key=True)
-    assignment_id = db.Column(db.String(50), db.ForeignKey("assignments.id"), nullable=False, index=True)
+    assignment_id = db.Column(db.String(50), nullable=False, index=True)
     user_code = db.Column(db.String(50), nullable=False, index=True)
     filename = db.Column(db.String(255))
     file_data = db.Column(db.LargeBinary)
     description = db.Column(db.Text)
     updated_at = db.Column(db.DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
-
-    __table_args__ = (
-        db.UniqueConstraint('assignment_id', 'user_code', name='uq_submission_per_student'),
-    )
 
 # Create tables if not exist
 with app.app_context():
@@ -167,7 +176,7 @@ def serve_image(image_id):
                      as_attachment=False, download_name=img.filename)
 
 # ----------------
-# DOCUMENTS
+# DOCUMENTS (CV & ID)
 # ----------------
 @app.route("/documents", methods=["POST", "OPTIONS"])
 @cross_origin()
@@ -226,97 +235,53 @@ def serve_document(doc_id, filetype):
 # ----------------
 # ASSIGNMENTS
 # ----------------
-@app.route("/api/assignments/sync", methods=["POST", "OPTIONS"])
+@app.route("/api/assignments", methods=["POST", "OPTIONS"])
 @cross_origin()
-def sync_assignment():
+def create_assignment():
     if request.method == "OPTIONS":
         return "", 200
-    data = request.json
-    if not data or "id" not in data or "lecture_id" not in data or "title" not in data:
-        return jsonify({"error": "Missing required fields"}), 400
-
-    assignment_id = data["id"]
-    assignment = Assignment.query.get(assignment_id)
-    if not assignment:
+    lecture_id = request.form.get("lecture_id")
+    title = request.form.get("title")
+    deadline_iso = request.form.get("deadline_iso")
+    description = request.form.get("description")
+    if not lecture_id or not title or not deadline_iso:
+        return jsonify({"error": "lecture_id, title, deadline_iso required"}), 400
+    try:
+        file_filename = None
+        file_data = None
+        if "file" in request.files:
+            f = request.files["file"]
+            file_filename = safe_filename(f)
+            file_data = f.read()
+        assignment_id = request.form.get("id") or str(int(datetime.utcnow().timestamp()*1000))
         assignment = Assignment(
             id=assignment_id,
-            lecture_id=data["lecture_id"],
-            title=data["title"],
-            description=data.get("description"),
-            deadline_iso=data.get("deadline_iso"),
-            status=data.get("status", "open"),
-            file_filename=None,
-            file_data=None
+            lecture_id=lecture_id,
+            title=title,
+            description=description,
+            deadline_iso=deadline_iso,
+            file_filename=file_filename,
+            file_data=file_data
         )
         db.session.add(assignment)
         db.session.commit()
-
-    return jsonify({
-        "message": "Assignment synced",
-        "assignment_id": assignment.id
-    }), 200
-
-@app.route("/api/assignments/<assignment_id>/submissions", methods=["PUT", "OPTIONS"])
-@cross_origin()
-def update_submission(assignment_id):
-    if request.method == "OPTIONS":
-        return "", 200
-
-    user_code = request.form.get("user_code")
-    if not user_code:
-        return jsonify({"error": "user_code required"}), 400
-
-    # check assignment exists
-    assignment = Assignment.query.get(assignment_id)
-    if not assignment:
-        return jsonify({"error": f"Assignment {assignment_id} does not exist in Postgres. Please sync first."}), 404
-
-    try:
-        filename = None
-        data = None
-        if "file" in request.files:
-            f = request.files["file"]
-            filename = safe_filename(f)
-            data = f.read()
-
-        description = request.form.get("description")
-
-        sub = Submission.query.filter_by(assignment_id=assignment_id, user_code=user_code).first()
-        if sub:
-            if filename:
-                sub.filename = filename
-                sub.file_data = data
-            if description is not None:
-                sub.description = description
-            sub.updated_at = datetime.utcnow()
-        else:
-            sub = Submission(
-                assignment_id=assignment_id,
-                user_code=user_code,
-                filename=filename,
-                file_data=data,
-                description=description,
-                updated_at=datetime.utcnow()
-            )
-            db.session.add(sub)
-
-        db.session.commit()
-        file_url = f"/serve-submission-file/{sub.id}" if sub.filename else None
+        file_url = f"/serve-assignment-file/{assignment.id}" if file_filename else None
         return jsonify({
-            "message": "Submission saved",
-            "id": sub.id,
-            "assignment_id": sub.assignment_id,
-            "user_code": sub.user_code,
-            "updated_at": sub.updated_at.isoformat(),
-            "file_url": file_url
-        }), 200
+            "message": "Assignment created",
+            "assignment": {
+                "id": assignment.id,
+                "lecture_id": assignment.lecture_id,
+                "title": assignment.title,
+                "description": assignment.description,
+                "deadline_iso": assignment.deadline_iso,
+                "status": assignment.status,
+                "file_url": file_url,
+                "created_at": assignment.created_at.isoformat() if assignment.created_at else None
+            }
+        }), 201
     except Exception as e:
         db.session.rollback()
         return jsonify({"error": str(e)}), 500
-
-@app.route("/api/assignments", methods=["POST"])
-def create_assignment():
-    return jsonify({"error": "Use /api/assignments/sync for creating/syncing assignments"}), 400
 
 @app.route("/api/assignments", methods=["GET"])
 def list_assignments():
@@ -347,6 +312,42 @@ def serve_assignment_file(assignment_id):
     return send_file(BytesIO(a.file_data), mimetype=guess_mimetype(a.file_filename),
                      as_attachment=True, download_name=a.file_filename)
 
+# ----------------
+# SUBMISSIONS
+# ----------------
+@app.route("/api/assignments/<assignment_id>/submissions", methods=["PUT", "OPTIONS"])
+@cross_origin()
+def update_submission(assignment_id):
+    if request.method == "OPTIONS":
+        return "", 200
+    user_code = request.form.get("user_code")
+    if not user_code:
+        return jsonify({"error": "user_code required"}), 400
+    try:
+        filename = None
+        data = None
+        if "file" in request.files:
+            f = request.files["file"]
+            filename = safe_filename(f)
+            data = f.read()
+        description = request.form.get("description")
+        sub = Submission.query.filter_by(assignment_id=assignment_id, user_code=user_code).first()
+        if not sub:
+            sub = Submission(assignment_id=assignment_id, user_code=user_code)
+        if filename:
+            sub.filename = filename
+            sub.file_data = data
+        if description is not None:
+            sub.description = description
+        sub.updated_at = datetime.utcnow()
+        db.session.add(sub)
+        db.session.commit()
+        file_url = f"/serve-submission-file/{sub.id}" if sub.filename else None
+        return jsonify({"message": "Submission updated", "id": sub.id, "updated_at": sub.updated_at.isoformat(), "file_url": file_url}), 200
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({"error": str(e)}), 500
+
 @app.route("/api/assignments/<assignment_id>/submissions", methods=["GET"])
 def list_submissions_for_assignment(assignment_id):
     subs = Submission.query.filter_by(assignment_id=assignment_id).all()
@@ -362,6 +363,22 @@ def list_submissions_for_assignment(assignment_id):
             "updated_at": s.updated_at.isoformat() if s.updated_at else None
         })
     return jsonify({"submissions": result})
+
+@app.route("/api/assignments/<assignment_id>/submissions", methods=["DELETE"])
+def delete_submission(assignment_id):
+    user_code = request.args.get("user_code")
+    if not user_code:
+        return jsonify({"error": "user_code required"}), 400
+    sub = Submission.query.filter_by(assignment_id=assignment_id, user_code=user_code).first()
+    if not sub:
+        return jsonify({"error": "Submission not found"}), 404
+    try:
+        db.session.delete(sub)
+        db.session.commit()
+        return jsonify({"message": f"Submission deleted for user {user_code}"}), 200
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({"error": str(e)}), 500
 
 @app.route("/serve-submission-file/<int:submission_id>", methods=["GET"])
 def serve_submission_file(submission_id):
