@@ -15,7 +15,6 @@ from flask_cors import CORS, cross_origin
 app = Flask(__name__)
 CORS(app, supports_credentials=True, origins="*")
 
-
 # ----------------
 # Config
 # ----------------
@@ -42,8 +41,6 @@ db = SQLAlchemy(app)
 # ----------------
 # CORS
 # ----------------
-# Use a more robust CORS configuration that explicitly supports credentials
-# and sets allowed methods.
 CORS(
     app,
     supports_credentials=True,
@@ -88,12 +85,16 @@ class Assignment(db.Model):
 class Submission(db.Model):
     __tablename__ = "submissions"
     id = db.Column(db.Integer, primary_key=True)
-    assignment_id = db.Column(db.String(50), nullable=False, index=True)
+    assignment_id = db.Column(db.String(50), db.ForeignKey("assignments.id"), nullable=False, index=True)
     user_code = db.Column(db.String(50), nullable=False, index=True)
     filename = db.Column(db.String(255))
     file_data = db.Column(db.LargeBinary)
     description = db.Column(db.Text)
     updated_at = db.Column(db.DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    __table_args__ = (
+        db.UniqueConstraint('assignment_id', 'user_code', name='uq_submission_per_student'),
+    )
 
 # Create tables if not exist
 with app.app_context():
@@ -320,9 +321,16 @@ def serve_assignment_file(assignment_id):
 def update_submission(assignment_id):
     if request.method == "OPTIONS":
         return "", 200
+
     user_code = request.form.get("user_code")
     if not user_code:
         return jsonify({"error": "user_code required"}), 400
+
+    # check if assignment exists
+    assignment = Assignment.query.get(assignment_id)
+    if not assignment:
+        return jsonify({"error": f"Assignment {assignment_id} does not exist"}), 404
+
     try:
         filename = None
         data = None
@@ -330,20 +338,42 @@ def update_submission(assignment_id):
             f = request.files["file"]
             filename = safe_filename(f)
             data = f.read()
+
         description = request.form.get("description")
+
+        # find existing submission
         sub = Submission.query.filter_by(assignment_id=assignment_id, user_code=user_code).first()
-        if not sub:
-            sub = Submission(assignment_id=assignment_id, user_code=user_code)
-        if filename:
-            sub.filename = filename
-            sub.file_data = data
-        if description is not None:
-            sub.description = description
-        sub.updated_at = datetime.utcnow()
-        db.session.add(sub)
+
+        if sub:
+            # update existing
+            if filename:
+                sub.filename = filename
+                sub.file_data = data
+            if description is not None:
+                sub.description = description
+            sub.updated_at = datetime.utcnow()
+        else:
+            # create new
+            sub = Submission(
+                assignment_id=assignment_id,
+                user_code=user_code,
+                filename=filename,
+                file_data=data,
+                description=description,
+                updated_at=datetime.utcnow()
+            )
+            db.session.add(sub)
+
         db.session.commit()
         file_url = f"/serve-submission-file/{sub.id}" if sub.filename else None
-        return jsonify({"message": "Submission updated", "id": sub.id, "updated_at": sub.updated_at.isoformat(), "file_url": file_url}), 200
+        return jsonify({
+            "message": "Submission saved",
+            "id": sub.id,
+            "assignment_id": sub.assignment_id,
+            "user_code": sub.user_code,
+            "updated_at": sub.updated_at.isoformat(),
+            "file_url": file_url
+        }), 200
     except Exception as e:
         db.session.rollback()
         return jsonify({"error": str(e)}), 500
