@@ -1,19 +1,28 @@
-# app.py  (full updated Flask app)
+# app.py  (full updated Flask app — improved /documents handling, logging, error handlers)
 import os
 import mimetypes
+import logging
+import traceback
 from datetime import datetime
 from io import BytesIO
 
-from flask import Flask, request, jsonify, send_file, send_from_directory, current_app
+from flask import Flask, request, jsonify, send_file, current_app
 from flask_sqlalchemy import SQLAlchemy
 from werkzeug.utils import secure_filename
 from sqlalchemy import func
 from flask_cors import CORS, cross_origin
+from werkzeug.exceptions import RequestEntityTooLarge
 
 # ----------------
 # Flask App
 # ----------------
 app = Flask(__name__)
+
+# ----------------
+# Logging
+# ----------------
+logging.basicConfig(level=logging.DEBUG, format="%(asctime)s [%(levelname)s] %(message)s")
+app.logger.setLevel(logging.DEBUG)
 
 # ----------------
 # Config
@@ -46,9 +55,9 @@ app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 db = SQLAlchemy(app)
 
 # ----------------
-# CORS
+# CORS (permissive)
 # ----------------
-# You previously used origins="*". keep it permissive (JS removed credentials).
+# Frontend now sends no credentials; keep origins="*" for simplicity.
 CORS(
     app,
     supports_credentials=True,
@@ -105,6 +114,9 @@ class Submission(db.Model):
 # Create tables if not exist
 with app.app_context():
     db.create_all()
+    app.logger.debug("Database initialized; UPLOAD_DIR=%s", app.config['UPLOAD_DIR'])
+    if not os.access(app.config['UPLOAD_DIR'], os.W_OK):
+        app.logger.warning("UPLOAD_DIR %s may not be writable by the process", app.config['UPLOAD_DIR'])
 
 # ----------------
 # Helpers
@@ -120,7 +132,6 @@ def guess_mimetype(filename):
     return mime or "application/octet-stream"
 
 def user_upload_folder(user_code):
-    # Return absolute directory where this user's files should be stored
     folder = os.path.join(app.config['UPLOAD_DIR'], str(user_code))
     os.makedirs(folder, exist_ok=True)
     return folder
@@ -128,41 +139,50 @@ def user_upload_folder(user_code):
 def save_file_to_disk(file_obj, user_code, role_hint=None):
     """
     Save uploaded file object to disk under user's folder.
-    role_hint used only for filename prefix. Returns (filename, relative_path).
+    role_hint used only for filename prefix. Returns (stored_name, relative_path).
     """
     filename = safe_filename(file_obj)
-    # prepend timestamp to avoid collisions
+    if not filename:
+        # fallback name to avoid empty filenames
+        filename = "uploaded_file"
     timestamp = datetime.utcnow().strftime("%Y%m%d%H%M%S%f")
     prefix = (role_hint + "_") if role_hint else ""
     stored_name = f"{prefix}{timestamp}_{filename}"
     folder = user_upload_folder(user_code)
     full_path = os.path.join(folder, stored_name)
-    # save stream to disk
-    file_obj.stream.seek(0)
-    file_obj.save(full_path)
-    # store paths relative to upload dir (so easy to move upload dir if needed)
+    app.logger.debug("Saving uploaded file to %s", full_path)
+    try:
+        # some FileStorage objects may not have stream or seek allowance; ignore seek errors
+        try:
+            file_obj.stream.seek(0)
+        except Exception:
+            app.logger.debug("file_obj.stream.seek not supported; continuing")
+        file_obj.save(full_path)
+    except Exception as e:
+        app.logger.error("Failed to save uploaded file to disk: %s", e)
+        raise
     rel_path = os.path.relpath(full_path, app.config['UPLOAD_DIR'])
-    return stored_name, rel_path  # filename, relative path
+    return stored_name, rel_path
 
 def make_file_url_from_relpath(relpath):
     # relpath is relative to UPLOAD_DIR; create API URL to serve it
-    # route: /serve-document-by-path/<path:relpath>
     return f"/serve-document-by-path/{relpath}"
 
 # ----------------
-# Root + Health
+# Error handlers
 # ----------------
-@app.route("/")
-def index():
-    return jsonify({"message": "Flask API (Postgres/Neon) is live!"})
+@app.errorhandler(RequestEntityTooLarge)
+def handle_large_file(e):
+    app.logger.error("RequestEntityTooLarge: %s", e)
+    return jsonify({"error": "File too large. Max size is 50 MB."}), 413
 
-@app.route("/health")
-def health_check():
-    try:
-        db.session.execute("SELECT 1")
-        return jsonify({"status": "healthy", "db": "connected"}), 200
-    except Exception as e:
-        return jsonify({"status": "unhealthy", "error": str(e)}), 500
+@app.errorhandler(Exception)
+def handle_unexpected_error(e):
+    tb = traceback.format_exc()
+    app.logger.error("Unhandled exception: %s\n%s", e, tb)
+    if app.debug:
+        return jsonify({"error": str(e), "traceback": tb}), 500
+    return jsonify({"error": "Internal server error"}), 500
 
 # ----------------
 # FIRM IMAGES (unchanged)
@@ -193,6 +213,7 @@ def upload_images():
         return jsonify({"message": f"{len(created)} images saved", "file_paths": urls}), 200
     except Exception as e:
         db.session.rollback()
+        app.logger.error("upload_images error: %s\n%s", e, traceback.format_exc())
         return jsonify({"error": str(e)}), 500
 
 @app.route("/get-images/<user_code>", methods=["GET"])
@@ -202,6 +223,7 @@ def get_images(user_code):
         urls = [f"/serve-image/{r.id}" for r in rows]
         return jsonify({"user_code": user_code, "file_paths": urls}), 200
     except Exception as e:
+        app.logger.error("get_images error: %s\n%s", e, traceback.format_exc())
         return jsonify({"error": str(e)}), 500
 
 @app.route("/serve-image/<int:image_id>", methods=["GET"])
@@ -213,7 +235,7 @@ def serve_image(image_id):
                      as_attachment=False, download_name=img.filename)
 
 # ----------------
-# DOCUMENTS (CV & ID) - updated to disk-backed storage
+# DOCUMENTS (CV & ID) - disk-backed storage, creates new row for single-file uploads
 # ----------------
 @app.route("/documents", methods=["POST", "OPTIONS"])
 @cross_origin()
@@ -221,14 +243,20 @@ def upload_documents():
     """
     Supports:
     - Both files: 'cvFile' and 'idFile' -> saves both, creates new DB row
-    - Single file: 'file' with form 'file_type'='cv'|'id' -> saves/updates DB row for user
+    - Single file: 'file' with form 'file_type'='cv'|'id' -> saves and creates a new DB row
     - Single file: 'file' without file_type -> server will attempt to infer by mime/type (image -> id, doc/pdf -> cv)
     """
     if request.method == "OPTIONS":
         return "", 200
 
+    try:
+        app.logger.info("Documents upload request: form=%s files=%s", dict(request.form), list(request.files.keys()))
+    except Exception:
+        app.logger.info("Documents upload request (couldn't stringify form/files)")
+
     user_code = request.form.get("user_code")
     if not user_code:
+        app.logger.warning("Missing user_code in request.form")
         return jsonify({"error": "user_code is required"}), 400
 
     # Mode 1: both files provided
@@ -236,6 +264,9 @@ def upload_documents():
         try:
             cv = request.files["cvFile"]
             idf = request.files["idFile"]
+
+            if not cv.filename or not idf.filename:
+                return jsonify({"error": "Empty filename provided"}), 400
 
             cv_name, cv_rel = save_file_to_disk(cv, user_code, role_hint="cv")
             id_name, id_rel = save_file_to_disk(idf, user_code, role_hint="id")
@@ -259,32 +290,28 @@ def upload_documents():
 
         except Exception as e:
             db.session.rollback()
+            app.logger.error("Error uploading both documents: %s\n%s", e, traceback.format_exc())
             return jsonify({"error": str(e)}), 500
 
     # Mode 2: single upload (generic 'file')
     if "file" in request.files:
         file_obj = request.files["file"]
-        file_type = (request.form.get("file_type") or request.form.get("type") or "").lower().strip()  # 'cv' or 'id' preferred
+        file_type = (request.form.get("file_type") or request.form.get("type") or "").lower().strip()
 
         # Try to infer if no explicit file_type
         if not file_type:
             mim = guess_mimetype(safe_filename(file_obj))
-            if mim.startswith("image/"):
-                file_type = "id"
-            else:
-                # treat documents (pdf/doc) as cv by default
-                file_type = "cv"
+            file_type = "id" if mim.startswith("image/") else "cv"
 
         try:
+            if not file_obj.filename:
+                return jsonify({"error": "Empty filename provided"}), 400
+
             role_hint = "cv" if file_type == "cv" else "id"
             saved_name, saved_rel = save_file_to_disk(file_obj, user_code, role_hint=role_hint)
 
-            # try to find existing Document for user that is missing the counterpart
-            doc = Document.query.filter_by(user_code=user_code).order_by(Document.uploaded_at.desc()).first()
-
-            if not doc:
-                # create new document row with only this file set
-                doc = Document(user_code=user_code)
+            # Create a new document row (you said creating two rows for separate uploads is acceptable)
+            doc = Document(user_code=user_code)
             if file_type == "cv":
                 doc.cv_filename = saved_name
                 doc.cv_path = saved_rel
@@ -303,25 +330,30 @@ def upload_documents():
             }), 201
         except Exception as e:
             db.session.rollback()
+            app.logger.error("Error uploading single file: %s\n%s", e, traceback.format_exc())
             return jsonify({"error": str(e)}), 500
 
-    # If we reach here, no file params were found
+    # If reached here, no files found
     return jsonify({"error": "No files provided. Expect cvFile+idFile or single 'file'."}), 400
 
 @app.route("/documents/<user_code>", methods=["GET"])
 def list_documents(user_code):
-    docs = Document.query.filter_by(user_code=user_code).all()
-    result = []
-    for d in docs:
-        result.append({
-            "id": d.id,
-            "cv_filename": d.cv_filename,
-            "cv_url": make_file_url_from_relpath(d.cv_path) if d.cv_path else None,
-            "id_filename": d.id_filename,
-            "id_url": make_file_url_from_relpath(d.id_path) if d.id_path else None,
-            "uploaded_at": d.uploaded_at.isoformat() if d.uploaded_at else None
-        })
-    return jsonify(result)
+    try:
+        docs = Document.query.filter_by(user_code=user_code).all()
+        result = []
+        for d in docs:
+            result.append({
+                "id": d.id,
+                "cv_filename": d.cv_filename,
+                "cv_url": make_file_url_from_relpath(d.cv_path) if d.cv_path else None,
+                "id_filename": d.id_filename,
+                "id_url": make_file_url_from_relpath(d.id_path) if d.id_path else None,
+                "uploaded_at": d.uploaded_at.isoformat() if d.uploaded_at else None
+            })
+        return jsonify(result)
+    except Exception as e:
+        app.logger.error("list_documents error: %s\n%s", e, traceback.format_exc())
+        return jsonify({"error": str(e)}), 500
 
 @app.route("/serve-document/<int:doc_id>/<string:filetype>", methods=["GET"])
 def serve_document(doc_id, filetype):
@@ -355,17 +387,13 @@ def serve_document(doc_id, filetype):
 def serve_document_by_path(relpath):
     """
     Serve a file by its relative path under UPLOAD_DIR.
-    This lets the frontend use the path returned by list_documents or upload responses.
     """
-    # Normalize path for security
     safe_rel = os.path.normpath(relpath)
-    # Prevent path traversal
     if safe_rel.startswith(".."):
         return jsonify({"error": "Invalid path"}), 400
     abs_path = os.path.join(app.config['UPLOAD_DIR'], safe_rel)
     if not os.path.exists(abs_path):
         return jsonify({"error": "File not found"}), 404
-    # Derive filename from path
     filename = os.path.basename(abs_path)
     return send_file(abs_path, mimetype=guess_mimetype(filename), as_attachment=True, download_name=filename)
 
@@ -418,6 +446,7 @@ def create_assignment():
         }), 201
     except Exception as e:
         db.session.rollback()
+        app.logger.error("create_assignment error: %s\n%s", e, traceback.format_exc())
         return jsonify({"error": str(e)}), 500
 
 @app.route("/api/assignments", methods=["GET"])
@@ -483,6 +512,7 @@ def update_submission(assignment_id):
         return jsonify({"message": "Submission updated", "id": sub.id, "updated_at": sub.updated_at.isoformat(), "file_url": file_url}), 200
     except Exception as e:
         db.session.rollback()
+        app.logger.error("update_submission error: %s\n%s", e, traceback.format_exc())
         return jsonify({"error": str(e)}), 500
 
 @app.route("/api/assignments/<assignment_id>/submissions", methods=["GET"])
@@ -515,6 +545,7 @@ def delete_submission(assignment_id):
         return jsonify({"message": f"Submission deleted for user {user_code}"}), 200
     except Exception as e:
         db.session.rollback()
+        app.logger.error("delete_submission error: %s\n%s", e, traceback.format_exc())
         return jsonify({"error": str(e)}), 500
 
 @app.route("/serve-submission-file/<int:submission_id>", methods=["GET"])
@@ -530,4 +561,5 @@ def serve_submission_file(submission_id):
 # ----------------
 if __name__ == "__main__":
     debug = os.getenv("FLASK_DEBUG", "false").lower() in ("1", "true")
+    app.debug = debug
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)), debug=debug)
