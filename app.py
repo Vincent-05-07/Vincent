@@ -73,6 +73,25 @@ class Document(db.Model):
     id_data = db.Column(db.LargeBinary, nullable=False)
     uploaded_at = db.Column(db.DateTime(timezone=True), server_default=func.now())
 
+class UserCV(db.Model):
+    __tablename__ = "user_cv"
+    id = db.Column(db.Integer, primary_key=True)
+    user_code = db.Column(db.String(50), nullable=False)
+    filename = db.Column(db.String(255))
+    file_path = db.Column(db.Text)
+    file_data = db.Column(db.LargeBinary)
+    uploaded_at = db.Column(db.DateTime(timezone=True), server_default=func.now())
+
+class UserIDDoc(db.Model):
+    __tablename__ = "user_id_doc"
+    id = db.Column(db.Integer, primary_key=True)
+    user_code = db.Column(db.String(50), nullable=False)
+    filename = db.Column(db.String(255))
+    file_path = db.Column(db.Text)
+    file_data = db.Column(db.LargeBinary)
+    uploaded_at = db.Column(db.DateTime(timezone=True), server_default=func.now())
+
+
 class Assignment(db.Model):
     __tablename__ = "assignments"
     id = db.Column(db.String(50), primary_key=True)
@@ -166,6 +185,22 @@ def get_images(user_code):
         return jsonify({"user_code": user_code, "file_paths": urls}), 200
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+@app.route("/serve-cv/<int:cv_id>", methods=["GET"])
+def serve_cv(cv_id):
+    doc = UserCV.query.get(cv_id)
+    if not doc:
+        return jsonify({"error": "CV not found"}), 404
+    return send_file(BytesIO(doc.file_data), mimetype=guess_mimetype(doc.filename),
+                     as_attachment=True, download_name=doc.filename)
+
+
+@app.route("/serve-id/<int:id_id>", methods=["GET"])
+def serve_id(id_id):
+    doc = UserIDDoc.query.get(id_id)
+    if not doc:
+        return jsonify({"error": "ID not found"}), 404
+    return send_file(BytesIO(doc.file_data), mimetype=guess_mimetype(doc.filename),
+                     as_attachment=True, download_name=doc.filename)
 
 @app.route("/serve-image/<int:image_id>", methods=["GET"])
 def serve_image(image_id):
