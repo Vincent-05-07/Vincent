@@ -175,6 +175,48 @@ def health_check():
 # ----------------
 # Assignment file upload
 # ----------------
+
+@app.route("/api/assignments/<assignment_id>/submissions/<user_code>", methods=["PUT", "OPTIONS"])
+@cross_origin()
+def replace_submission(assignment_id, user_code):
+    if request.method == "OPTIONS":
+        return "", 200
+
+    file_obj = request.files.get("file")
+    if not file_obj or not file_obj.filename:
+        return jsonify({"error": "No file provided"}), 400
+
+    try:
+        # Save file
+        saved_name, saved_rel = save_file_to_disk(file_obj, user_code, role_hint="submission")
+
+        # Find existing submission
+        submission = Submission.query.filter_by(assignment_id=assignment_id, user_code=user_code).first()
+        if submission:
+            submission.filename = saved_name
+            submission.file_path = saved_rel
+            submission.updated_at = datetime.utcnow()
+        else:
+            submission = Submission(
+                assignment_id=assignment_id,
+                user_code=user_code,
+                filename=saved_name,
+                file_path=saved_rel
+            )
+            db.session.add(submission)
+
+        db.session.commit()
+
+        return jsonify({
+            "message": "Submission replaced",
+            "submission_id": submission.id,
+            "file_url": make_file_url_from_relpath(saved_rel)
+        }), 200
+
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({"error": str(e)}), 500
+
 @app.route("/upload-assignment-file", methods=["POST", "OPTIONS"])
 @cross_origin()
 def upload_assignment_file():
