@@ -1,5 +1,7 @@
 # app.py
 import os
+import uuid
+
 import mimetypes
 import logging
 import traceback
@@ -217,6 +219,7 @@ def replace_submission(assignment_id, user_code):
         db.session.rollback()
         return jsonify({"error": str(e)}), 500
 
+
 @app.route("/upload-assignment-file", methods=["POST", "OPTIONS"])
 @cross_origin()
 def upload_assignment_file():
@@ -224,19 +227,22 @@ def upload_assignment_file():
         return "", 200
 
     lecture_id = request.form.get("lecture_id")
-    assignment_id = request.form.get("assignment_id")  # Firebase ID
+    assignment_id = request.form.get("assignment_id")  # optional
     file_obj = request.files.get("file")
 
-    if not lecture_id or not assignment_id or not file_obj:
-        return jsonify({"error": "Missing lecture_id, assignment_id or file"}), 400
-    if not file_obj.filename:
-        return jsonify({"error": "Empty filename provided"}), 400
+    if not lecture_id:
+        return jsonify({"error": "Missing lecture_id"}), 400
+
+    # Generate backend assignment ID if not provided
+    if not assignment_id:
+        assignment_id = str(uuid.uuid4())
 
     try:
-        saved_name, saved_rel = save_file_to_disk(file_obj, lecture_id, role_hint="assignment")
-        file_url = make_file_url_from_relpath(saved_rel)
+        saved_name, saved_rel = None, None
+        if file_obj and file_obj.filename:
+            saved_name, saved_rel = save_file_to_disk(file_obj, lecture_id, role_hint="assignment")
 
-        # Store minimal record in DB
+        # Store in DB
         assignment = Assignment(
             id=assignment_id,
             lecture_id=lecture_id,
@@ -245,13 +251,13 @@ def upload_assignment_file():
             deadline_iso=request.form.get("deadline_iso", ""),
             file_filename=saved_name
         )
-        db.session.merge(assignment)  # upsert
+        db.session.merge(assignment)
         db.session.commit()
 
         return jsonify({
-            "message": "Assignment file uploaded",
+            "message": "Assignment created",
             "assignment_id": assignment_id,
-            "file_url": file_url
+            "file_url": make_file_url_from_relpath(saved_rel) if saved_rel else None
         }), 201
     except Exception as e:
         db.session.rollback()
