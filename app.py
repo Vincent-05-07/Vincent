@@ -1,4 +1,4 @@
-# app.py  (fixed: proper CORS usage, HTTPException handling, logging)
+# app.py  (refactored: separate CV/ID tables, no binary image storage, separate upload endpoints)
 import os
 import mimetypes
 import logging
@@ -54,7 +54,6 @@ db = SQLAlchemy(app)
 # ----------------
 # CORS - permissive for your frontend (no credentials used)
 # ----------------
-# Use resources dict and origins "*" (keeps it permissive)
 CORS(app, resources={r"/*": {"origins": "*"}})
 
 # ----------------
@@ -64,23 +63,30 @@ class FirmImage(db.Model):
     __tablename__ = "firm_images"
     id = db.Column(db.Integer, primary_key=True)
     user_code = db.Column(db.String(50), index=True, nullable=False)
-    file_path = db.Column(db.String(255), nullable=False)
+    file_path = db.Column(db.String(1024), nullable=False)  # relative path under UPLOAD_DIR
     filename = db.Column(db.String(255), nullable=False)
-    image_data = db.Column(db.LargeBinary)  # legacy/optional
     uploaded_at = db.Column(db.DateTime(timezone=True), server_default=func.now())
 
-class Document(db.Model):
-    __tablename__ = "documents"
+class UserCV(db.Model):
+    __tablename__ = "user_cvs"
     id = db.Column(db.Integer, primary_key=True)
     user_code = db.Column(db.String(50), index=True, nullable=False)
-    cv_filename = db.Column(db.String(255), nullable=True)
-    cv_path = db.Column(db.String(1024), nullable=True)
-    id_filename = db.Column(db.String(255), nullable=True)
-    id_path = db.Column(db.String(1024), nullable=True)
+    filename = db.Column(db.String(255), nullable=False)
+    file_path = db.Column(db.String(1024), nullable=False)
+    uploaded_at = db.Column(db.DateTime(timezone=True), server_default=func.now())
+
+class UserIDDoc(db.Model):
+    __tablename__ = "user_id_docs"
+    id = db.Column(db.Integer, primary_key=True)
+    user_code = db.Column(db.String(50), index=True, nullable=False)
+    filename = db.Column(db.String(255), nullable=False)
+    file_path = db.Column(db.String(1024), nullable=False)
     uploaded_at = db.Column(db.DateTime(timezone=True), server_default=func.now())
 
 class Assignment(db.Model):
     __tablename__ = "assignments"
+    # Keep assignment id as a string (Firebase may provide logical ids);
+    # This model is optional if you're moving assignments fully to Firebase.
     id = db.Column(db.String(50), primary_key=True)
     lecture_id = db.Column(db.String(50), index=True, nullable=False)
     title = db.Column(db.String(255), nullable=False)
@@ -88,16 +94,17 @@ class Assignment(db.Model):
     deadline_iso = db.Column(db.String(50))
     status = db.Column(db.String(20), default="open")
     file_filename = db.Column(db.String(255))
-    file_data = db.Column(db.LargeBinary)
+    file_data = db.Column(db.LargeBinary)  # <-- you can remove this if you won't store assignment file blobs
     created_at = db.Column(db.DateTime(timezone=True), server_default=func.now())
 
 class Submission(db.Model):
     __tablename__ = "submissions"
     id = db.Column(db.Integer, primary_key=True)
+    # assignment_id is plain string (no FK). You said you'd store assignment metadata in Firebase.
     assignment_id = db.Column(db.String(50), nullable=False, index=True)
     user_code = db.Column(db.String(50), nullable=False, index=True)
     filename = db.Column(db.String(255))
-    file_data = db.Column(db.LargeBinary)
+    file_path = db.Column(db.String(1024))  # store location on disk
     description = db.Column(db.Text)
     updated_at = db.Column(db.DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
@@ -114,6 +121,7 @@ with app.app_context():
 def safe_filename(file_obj):
     if not file_obj:
         return ""
+    # file_obj could be a werkzeug FileStorage or a string
     name = getattr(file_obj, "filename", file_obj)
     return secure_filename(name or "")
 
@@ -127,6 +135,10 @@ def user_upload_folder(user_code):
     return folder
 
 def save_file_to_disk(file_obj, user_code, role_hint=None):
+    """
+    Saves the uploaded file to disk under UPLOAD_DIR/<user_code>/<role_hint>_<timestamp>_<filename>
+    Returns (stored_name, rel_path) where rel_path is relative to UPLOAD_DIR.
+    """
     filename = safe_filename(file_obj)
     if not filename:
         filename = "uploaded_file"
@@ -138,6 +150,7 @@ def save_file_to_disk(file_obj, user_code, role_hint=None):
     app.logger.debug("Saving uploaded file to %s", full_path)
     try:
         try:
+            # sometimes FileStorage has .stream
             file_obj.stream.seek(0)
         except Exception:
             app.logger.debug("file_obj.stream.seek not supported; continuing")
@@ -149,6 +162,7 @@ def save_file_to_disk(file_obj, user_code, role_hint=None):
     return stored_name, rel_path
 
 def make_file_url_from_relpath(relpath):
+    # The path parameter will be URL-encoded by the client; keep route consistent
     return f"/serve-document-by-path/{relpath}"
 
 # ----------------
@@ -188,7 +202,7 @@ def health_check():
         return jsonify({"status": "unhealthy", "error": str(e)}), 500
 
 # ----------------
-# upload-images (same as before)
+# Images endpoint (store path only, not binary in DB)
 # ----------------
 @app.route("/upload-images", methods=["POST", "OPTIONS"])
 @cross_origin()
@@ -205,122 +219,174 @@ def upload_images():
             filename = safe_filename(image_file)
             ext = os.path.splitext(filename)[1] or ".jpg"
             filename_with_index = f"image_{idx}{ext}"
-            file_path = f"wil-firm-pics/{user_code}/{filename_with_index}"
-            data = image_file.read()
-            img = FirmImage(user_code=user_code, file_path=file_path, filename=filename_with_index, image_data=data)
+            # Save to disk with role hint 'firmimg'
+            saved_name, rel_path = save_file_to_disk(image_file, user_code, role_hint="firmimg")
+            # Store DB record with relative path
+            file_path = os.path.join("wil-firm-pics", str(user_code), saved_name)
+            # Normalize relative path under UPLOAD_DIR
+            # Note: save_file_to_disk returns rel_path relative to UPLOAD_DIR
+            img = FirmImage(user_code=user_code, file_path=rel_path, filename=saved_name)
             db.session.add(img)
             db.session.flush()
-            created.append({"id": img.id, "file_path": file_path})
+            created.append({"id": img.id, "file_path": make_file_url_from_relpath(img.file_path)})
         db.session.commit()
-        urls = [f"/serve-image/{c['id']}" for c in created]
-        return jsonify({"message": f"{len(created)} images saved", "file_paths": urls}), 200
+        return jsonify({"message": f"{len(created)} images saved", "file_paths": created}), 200
     except Exception as e:
         db.session.rollback()
         app.logger.error("upload_images error: %s\n%s", e, traceback.format_exc())
         return jsonify({"error": str(e)}), 500
 
 # ----------------
-# DOCUMENTS endpoints (disk-backed)
+# CV / ID upload endpoints (separate tables)
 # ----------------
-@app.route("/documents", methods=["POST", "OPTIONS"])
+@app.route("/upload-cv", methods=["POST", "OPTIONS"])
 @cross_origin()
-def upload_documents():
+def upload_cv():
     if request.method == "OPTIONS":
         return "", 200
-
-    try:
-        app.logger.info("Documents upload request: form=%s files=%s", dict(request.form), list(request.files.keys()))
-    except Exception:
-        app.logger.info("Documents upload request (couldn't stringify form/files)")
-
     user_code = request.form.get("user_code")
-    if not user_code:
-        return jsonify({"error": "user_code is required"}), 400
-
-    # both files
-    if "cvFile" in request.files and "idFile" in request.files:
-        try:
-            cv = request.files["cvFile"]; idf = request.files["idFile"]
-            if not cv.filename or not idf.filename:
-                return jsonify({"error": "Empty filename provided"}), 400
-            cv_name, cv_rel = save_file_to_disk(cv, user_code, role_hint="cv")
-            id_name, id_rel = save_file_to_disk(idf, user_code, role_hint="id")
-            doc = Document(user_code=user_code, cv_filename=cv_name, cv_path=cv_rel, id_filename=id_name, id_path=id_rel)
-            db.session.add(doc); db.session.commit()
-            return jsonify({"message": "Both documents uploaded", "id": doc.id, "cv_url": make_file_url_from_relpath(doc.cv_path), "id_url": make_file_url_from_relpath(doc.id_path)}), 201
-        except Exception as e:
-            db.session.rollback()
-            app.logger.error("Error uploading both documents: %s\n%s", e, traceback.format_exc())
-            return jsonify({"error": str(e)}), 500
-
-    # single generic file
-    if "file" in request.files:
-        file_obj = request.files["file"]
-        file_type = (request.form.get("file_type") or request.form.get("type") or "").lower().strip()
-        if not file_type:
-            mim = guess_mimetype(safe_filename(file_obj))
-            file_type = "id" if mim.startswith("image/") else "cv"
-        try:
-            if not file_obj.filename:
-                return jsonify({"error": "Empty filename provided"}), 400
-            role_hint = "cv" if file_type == "cv" else "id"
-            saved_name, saved_rel = save_file_to_disk(file_obj, user_code, role_hint=role_hint)
-            # create a new row (your preference was OK to create two rows)
-            doc = Document(user_code=user_code)
-            if file_type == "cv":
-                doc.cv_filename = saved_name; doc.cv_path = saved_rel
-            else:
-                doc.id_filename = saved_name; doc.id_path = saved_rel
-            db.session.add(doc); db.session.commit()
-            return jsonify({"message": f"{file_type.upper()} uploaded", "id": doc.id, "file_role": file_type, "file_url": make_file_url_from_relpath(saved_rel)}), 201
-        except Exception as e:
-            db.session.rollback()
-            app.logger.error("Error uploading single file: %s\n%s", e, traceback.format_exc())
-            return jsonify({"error": str(e)}), 500
-
-    return jsonify({"error": "No files provided. Expect cvFile+idFile or single 'file'."}), 400
-
-@app.route("/documents/<user_code>", methods=["GET"])
-def list_documents(user_code):
+    file_obj = request.files.get("cvFile") or request.files.get("file")
+    if not user_code or not file_obj:
+        return jsonify({"error": "Missing user_code or cvFile"}), 400
+    if not file_obj.filename:
+        return jsonify({"error": "Empty filename provided"}), 400
     try:
-        docs = Document.query.filter_by(user_code=user_code).all()
-        result = []
-        for d in docs:
-            result.append({
-                "id": d.id,
-                "cv_filename": d.cv_filename,
-                "cv_url": make_file_url_from_relpath(d.cv_path) if d.cv_path else None,
-                "id_filename": d.id_filename,
-                "id_url": make_file_url_from_relpath(d.id_path) if d.id_path else None,
-                "uploaded_at": d.uploaded_at.isoformat() if d.uploaded_at else None
-            })
-        return jsonify(result)
+        saved_name, saved_rel = save_file_to_disk(file_obj, user_code, role_hint="cv")
+        cv = UserCV(user_code=user_code, filename=saved_name, file_path=saved_rel)
+        db.session.add(cv)
+        db.session.commit()
+        return jsonify({
+            "message": "CV uploaded",
+            "id": cv.id,
+            "file_url": make_file_url_from_relpath(cv.file_path)
+        }), 201
     except Exception as e:
-        app.logger.error("list_documents error: %s\n%s", e, traceback.format_exc())
+        db.session.rollback()
+        app.logger.error("upload_cv error: %s\n%s", e, traceback.format_exc())
         return jsonify({"error": str(e)}), 500
 
-@app.route("/serve-document/<int:doc_id>/<string:filetype>", methods=["GET"])
-def serve_document(doc_id, filetype):
-    doc = Document.query.get(doc_id)
-    if not doc:
-        return jsonify({"error": "Document not found"}), 404
-    if filetype == "cv":
-        if not doc.cv_path: return jsonify({"error": "CV not found"}), 404
-        abs_path = os.path.join(app.config['UPLOAD_DIR'], doc.cv_path)
-        if not os.path.exists(abs_path): return jsonify({"error": "CV file missing on server"}), 404
-        return send_file(abs_path, mimetype=guess_mimetype(doc.cv_filename), as_attachment=True, download_name=doc.cv_filename)
-    elif filetype == "id":
-        if not doc.id_path: return jsonify({"error": "ID not found"}), 404
-        abs_path = os.path.join(app.config['UPLOAD_DIR'], doc.id_path)
-        if not os.path.exists(abs_path): return jsonify({"error": "ID file missing on server"}), 404
-        return send_file(abs_path, mimetype=guess_mimetype(doc.id_filename), as_attachment=True, download_name=doc.id_filename)
-    else:
-        return jsonify({"error": "Invalid filetype"}), 400
+@app.route("/upload-id", methods=["POST", "OPTIONS"])
+@cross_origin()
+def upload_id():
+    if request.method == "OPTIONS":
+        return "", 200
+    user_code = request.form.get("user_code")
+    file_obj = request.files.get("idFile") or request.files.get("file")
+    if not user_code or not file_obj:
+        return jsonify({"error": "Missing user_code or idFile"}), 400
+    if not file_obj.filename:
+        return jsonify({"error": "Empty filename provided"}), 400
+    try:
+        saved_name, saved_rel = save_file_to_disk(file_obj, user_code, role_hint="id")
+        iddoc = UserIDDoc(user_code=user_code, filename=saved_name, file_path=saved_rel)
+        db.session.add(iddoc)
+        db.session.commit()
+        return jsonify({
+            "message": "ID uploaded",
+            "id": iddoc.id,
+            "file_url": make_file_url_from_relpath(iddoc.file_path)
+        }), 201
+    except Exception as e:
+        db.session.rollback()
+        app.logger.error("upload_id error: %s\n%s", e, traceback.format_exc())
+        return jsonify({"error": str(e)}), 500
 
+# ----------------
+# List CVs and IDs by user
+# ----------------
+@app.route("/user-cvs/<user_code>", methods=["GET"])
+def list_user_cvs(user_code):
+    try:
+        cvs = UserCV.query.filter_by(user_code=user_code).order_by(UserCV.uploaded_at.desc()).all()
+        result = [{
+            "id": c.id,
+            "filename": c.filename,
+            "file_url": make_file_url_from_relpath(c.file_path),
+            "uploaded_at": c.uploaded_at.isoformat() if c.uploaded_at else None
+        } for c in cvs]
+        return jsonify(result)
+    except Exception as e:
+        app.logger.error("list_user_cvs error: %s\n%s", e, traceback.format_exc())
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/user-ids/<user_code>", methods=["GET"])
+def list_user_ids(user_code):
+    try:
+        ids = UserIDDoc.query.filter_by(user_code=user_code).order_by(UserIDDoc.uploaded_at.desc()).all()
+        result = [{
+            "id": i.id,
+            "filename": i.filename,
+            "file_url": make_file_url_from_relpath(i.file_path),
+            "uploaded_at": i.uploaded_at.isoformat() if i.uploaded_at else None
+        } for i in ids]
+        return jsonify(result)
+    except Exception as e:
+        app.logger.error("list_user_ids error: %s\n%s", e, traceback.format_exc())
+        return jsonify({"error": str(e)}), 500
+
+# ----------------
+# Submissions endpoint (store path only)
+# ----------------
+@app.route("/submit/<assignment_id>", methods=["POST", "OPTIONS"])
+@cross_origin()
+def submit_assignment(assignment_id):
+    if request.method == "OPTIONS":
+        return "", 200
+    user_code = request.form.get("user_code")
+    file_obj = request.files.get("file")
+    description = request.form.get("description")
+    if not user_code or not file_obj:
+        return jsonify({"error": "Missing user_code or file"}), 400
+    if not file_obj.filename:
+        return jsonify({"error": "Empty filename provided"}), 400
+    try:
+        saved_name, saved_rel = save_file_to_disk(file_obj, user_code, role_hint="submission")
+        submission = Submission(
+            assignment_id=assignment_id,
+            user_code=user_code,
+            filename=saved_name,
+            file_path=saved_rel,
+            description=description
+        )
+        db.session.add(submission)
+        db.session.commit()
+        # Note: you can write metadata mapping (submission -> assignment) to Firebase here.
+        return jsonify({
+            "message": "Submission saved",
+            "submission_id": submission.id,
+            "file_url": make_file_url_from_relpath(submission.file_path)
+        }), 201
+    except Exception as e:
+        db.session.rollback()
+        app.logger.error("submit_assignment error: %s\n%s", e, traceback.format_exc())
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/submissions/<assignment_id>", methods=["GET"])
+def list_submissions_for_assignment(assignment_id):
+    try:
+        subs = Submission.query.filter_by(assignment_id=assignment_id).order_by(Submission.updated_at.desc()).all()
+        result = [{
+            "id": s.id,
+            "user_code": s.user_code,
+            "filename": s.filename,
+            "file_url": make_file_url_from_relpath(s.file_path) if s.file_path else None,
+            "description": s.description,
+            "updated_at": s.updated_at.isoformat() if s.updated_at else None
+        } for s in subs]
+        return jsonify(result)
+    except Exception as e:
+        app.logger.error("list_submissions_for_assignment error: %s\n%s", e, traceback.format_exc())
+        return jsonify({"error": str(e)}), 500
+
+# ----------------
+# Serve document by relative path under UPLOAD_DIR
+# ----------------
 @app.route("/serve-document-by-path/<path:relpath>", methods=["GET"])
 def serve_document_by_path(relpath):
+    # Normalize and prevent path traversal
     safe_rel = os.path.normpath(relpath)
-    if safe_rel.startswith(".."):
+    # Reject attempts to escape upload dir
+    if safe_rel.startswith("..") or os.path.isabs(safe_rel):
         return jsonify({"error": "Invalid path"}), 400
     abs_path = os.path.join(app.config['UPLOAD_DIR'], safe_rel)
     if not os.path.exists(abs_path):
@@ -328,7 +394,51 @@ def serve_document_by_path(relpath):
     filename = os.path.basename(abs_path)
     return send_file(abs_path, mimetype=guess_mimetype(filename), as_attachment=True, download_name=filename)
 
-# ... (assignments/submissions routes unchanged; omitted here for brevity, keep as before) ...
+# ----------------
+# Optional: cleanup endpoints or utilities
+# ----------------
+@app.route("/delete-user-file", methods=["POST"])
+@cross_origin()
+def delete_user_file():
+    """
+    Example helper: delete a stored file by specifying table and id.
+    Body (json): { "table": "cv"|"id"|"submission"|"image", "record_id": <int> }
+    NOTE: This is a utility and should be protected in production.
+    """
+    data = request.get_json() or {}
+    table = data.get("table")
+    record_id = data.get("record_id")
+    if not table or not record_id:
+        return jsonify({"error": "Missing table or record_id"}), 400
+    try:
+        if table == "cv":
+            rec = UserCV.query.get(record_id)
+        elif table == "id":
+            rec = UserIDDoc.query.get(record_id)
+        elif table == "submission":
+            rec = Submission.query.get(record_id)
+        elif table == "image":
+            rec = FirmImage.query.get(record_id)
+        else:
+            return jsonify({"error": "Invalid table"}), 400
+        if not rec:
+            return jsonify({"error": "Record not found"}), 404
+        # remove file from disk if path present
+        rel = getattr(rec, "file_path", None)
+        if rel:
+            abs_path = os.path.join(app.config['UPLOAD_DIR'], rel)
+            try:
+                if os.path.exists(abs_path):
+                    os.remove(abs_path)
+            except Exception as e:
+                app.logger.warning("Could not remove file %s: %s", abs_path, e)
+        db.session.delete(rec)
+        db.session.commit()
+        return jsonify({"message": "Deleted"}), 200
+    except Exception as e:
+        db.session.rollback()
+        app.logger.error("delete_user_file error: %s\n%s", e, traceback.format_exc())
+        return jsonify({"error": str(e)}), 500
 
 # Run
 if __name__ == "__main__":
