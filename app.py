@@ -185,6 +185,27 @@ def get_images(user_code):
         return jsonify({"user_code": user_code, "file_paths": urls}), 200
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+def guess_mimetype(filename):
+    mimetype, _ = mimetypes.guess_type(filename)
+    return mimetype or "application/octet-stream"
+
+# ------------------ UserCV CRUD ------------------
+
+# Create / Upload CV
+@app.route("/cv", methods=["POST"])
+def upload_cv():
+    if "file" not in request.files:
+        return jsonify({"error": "No file uploaded"}), 400
+    file = request.files["file"]
+    if file.filename == "":
+        return jsonify({"error": "Filename missing"}), 400
+    filename = secure_filename(file.filename)
+    cv = UserCV(filename=filename, file_data=file.read())
+    db.session.add(cv)
+    db.session.commit()
+    return jsonify({"message": "CV uploaded", "id": cv.id}), 201
+
+# Read / Download CV
 @app.route("/serve-cv/<int:cv_id>", methods=["GET"])
 def serve_cv(cv_id):
     doc = UserCV.query.get(cv_id)
@@ -193,7 +214,50 @@ def serve_cv(cv_id):
     return send_file(BytesIO(doc.file_data), mimetype=guess_mimetype(doc.filename),
                      as_attachment=True, download_name=doc.filename)
 
+# Update CV
+@app.route("/cv/<int:cv_id>", methods=["PUT"])
+def update_cv(cv_id):
+    doc = UserCV.query.get(cv_id)
+    if not doc:
+        return jsonify({"error": "CV not found"}), 404
+    if "file" not in request.files:
+        return jsonify({"error": "No file uploaded"}), 400
+    file = request.files["file"]
+    if file.filename == "":
+        return jsonify({"error": "Filename missing"}), 400
+    doc.filename = secure_filename(file.filename)
+    doc.file_data = file.read()
+    db.session.commit()
+    return jsonify({"message": "CV updated", "id": doc.id})
 
+# Delete CV
+@app.route("/cv/<int:cv_id>", methods=["DELETE"])
+def delete_cv(cv_id):
+    doc = UserCV.query.get(cv_id)
+    if not doc:
+        return jsonify({"error": "CV not found"}), 404
+    db.session.delete(doc)
+    db.session.commit()
+    return jsonify({"message": "CV deleted"}), 200
+
+
+# ------------------ UserIDDoc CRUD ------------------
+
+# Create / Upload ID
+@app.route("/id-doc", methods=["POST"])
+def upload_id_doc():
+    if "file" not in request.files:
+        return jsonify({"error": "No file uploaded"}), 400
+    file = request.files["file"]
+    if file.filename == "":
+        return jsonify({"error": "Filename missing"}), 400
+    filename = secure_filename(file.filename)
+    id_doc = UserIDDoc(filename=filename, file_data=file.read())
+    db.session.add(id_doc)
+    db.session.commit()
+    return jsonify({"message": "ID uploaded", "id": id_doc.id}), 201
+
+# Read / Download ID
 @app.route("/serve-id/<int:id_id>", methods=["GET"])
 def serve_id(id_id):
     doc = UserIDDoc.query.get(id_id)
@@ -201,6 +265,32 @@ def serve_id(id_id):
         return jsonify({"error": "ID not found"}), 404
     return send_file(BytesIO(doc.file_data), mimetype=guess_mimetype(doc.filename),
                      as_attachment=True, download_name=doc.filename)
+
+# Update ID
+@app.route("/id-doc/<int:id_id>", methods=["PUT"])
+def update_id_doc(id_id):
+    doc = UserIDDoc.query.get(id_id)
+    if not doc:
+        return jsonify({"error": "ID not found"}), 404
+    if "file" not in request.files:
+        return jsonify({"error": "No file uploaded"}), 400
+    file = request.files["file"]
+    if file.filename == "":
+        return jsonify({"error": "Filename missing"}), 400
+    doc.filename = secure_filename(file.filename)
+    doc.file_data = file.read()
+    db.session.commit()
+    return jsonify({"message": "ID updated", "id": doc.id})
+
+# Delete ID
+@app.route("/id-doc/<int:id_id>", methods=["DELETE"])
+def delete_id_doc(id_id):
+    doc = UserIDDoc.query.get(id_id)
+    if not doc:
+        return jsonify({"error": "ID not found"}), 404
+    db.session.delete(doc)
+    db.session.commit()
+    return jsonify({"message": "ID deleted"}), 200
 
 @app.route("/serve-image/<int:image_id>", methods=["GET"])
 def serve_image(image_id):
