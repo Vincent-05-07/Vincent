@@ -18,6 +18,9 @@ from werkzeug.exceptions import RequestEntityTooLarge, HTTPException
 # ----------------
 # Flask App
 # ----------------
+
+CORS(app, resources={r"/*": {"origins": "*"}})
+
 app = Flask(__name__)
 
 # ----------------
