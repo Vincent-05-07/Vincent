@@ -330,48 +330,51 @@ def serve_document_by_path(relpath):
     return send_file(abs_path, mimetype=guess_mimetype(filename), as_attachment=True, download_name=filename)
 
 
+# In your app.py file
+
 @app.route("/api/assignments", methods=["POST", "OPTIONS"])
 @cross_origin()
 def create_assignment_api():
-    if request.method == "OPTIONS":
-        return "", 200
+    if request.method == "OPTIONS":
+        return "", 200
+   
+    # Access form data sent from the JavaScript FormData object
+    lecture_id = request.form.get("lecture_id")
+    assignment_id = request.form.get("assignment_id")
+    title = request.form.get("title", "")
+    description = request.form.get("description", "")
+    deadline_iso = request.form.get("deadline_iso", "")
+    file_obj = request.files.get("file")
 
-    lecture_id = request.form.get("lecture_id")
-    assignment_id = request.form.get("assignment_id")
-    title = request.form.get("title", "")
-    description = request.form.get("description", "")
-    deadline_iso = request.form.get("deadline_iso", "")
-    file_obj = request.files.get("file")
+    if not lecture_id or not assignment_id:
+        # The error originates from this line when data is missing
+        return jsonify({"error": "Missing lecture_id or assignment_id"}), 400
 
-    if not lecture_id or not assignment_id:
-        return jsonify({"error": "Missing lecture_id or assignment_id"}), 400
+    try:
+        saved_name, saved_rel = (None, None)
+        if file_obj:
+            saved_name, saved_rel = save_file_to_disk(file_obj, lecture_id, role_hint="assignment")
 
-    try:
-        saved_name, saved_rel = (None, None)
-        if file_obj:
-            saved_name, saved_rel = save_file_to_disk(file_obj, lecture_id, role_hint="assignment")
+        assignment = Assignment(
+            id=assignment_id,
+            lecture_id=lecture_id,
+            title=title,
+            description=description,
+            deadline_iso=deadline_iso,
+            file_filename=saved_name
+        )
+        db.session.merge(assignment)
+        db.session.commit()
 
-        assignment = Assignment(
-            id=assignment_id,
-            lecture_id=lecture_id,
-            title=title,
-            description=description,
-            deadline_iso=deadline_iso,
-            file_filename=saved_name
-        )
-        db.session.merge(assignment)
-        db.session.commit()
+        return jsonify({
+            "message": "Assignment created",
+            "assignment_id": assignment.id,
+            "file_url": make_file_url_from_relpath(saved_rel) if saved_rel else None
+        }), 201
 
-        return jsonify({
-            "message": "Assignment created",
-            "assignment_id": assignment.id,
-            "file_url": make_file_url_from_relpath(saved_rel) if saved_rel else None
-        }), 201
-
-    except Exception as e:
-        db.session.rollback()
-        return jsonify({"error": str(e)}), 500
-
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({"error": str(e)}), 500
 # ----------------
 # Run
 # ----------------
