@@ -314,6 +314,35 @@ def update_id_doc(id_id):
     db.session.commit()
     return jsonify({"message": "ID updated", "id": doc.id})
 
+@app.route("/view-submission/<int:submission_id>", methods=["GET"])
+def view_submission(submission_id):
+    """
+    Serve a submission for inline viewing in the browser if supported.
+    """
+    sub = Submission.query.get(submission_id)
+    if not sub or not sub.file_data:
+        return jsonify({"error": "Submission not found"}), 404
+
+    # Guess the MIME type
+    mimetype = guess_mimetype(sub.filename)
+
+    # Determine if the file can be viewed inline (browser-friendly)
+    viewable_types = [
+        "application/pdf",  # PDF
+        "image/png", "image/jpeg", "image/jpg", "image/gif",  # Images
+        "text/plain",  # Text
+        "text/html"  # HTML
+    ]
+    as_attachment = mimetype not in viewable_types
+
+    return send_file(
+        BytesIO(sub.file_data),
+        mimetype=mimetype,
+        as_attachment=as_attachment,  # False for inline view
+        download_name=sub.filename
+    )
+
+
 # Delete ID
 @app.route("/id-doc/<int:id_id>", methods=["DELETE"])
 def delete_id_doc(id_id):
