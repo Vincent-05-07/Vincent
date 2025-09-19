@@ -192,18 +192,7 @@ def guess_mimetype(filename):
 # ------------------ UserCV CRUD ------------------
 
 # Create / Upload CV
-@app.route("/cv", methods=["POST"])
-def upload_cv():
-    if "file" not in request.files:
-        return jsonify({"error": "No file uploaded"}), 400
-    file = request.files["file"]
-    if file.filename == "":
-        return jsonify({"error": "Filename missing"}), 400
-    filename = secure_filename(file.filename)
-    cv = UserCV(filename=filename, file_data=file.read())
-    db.session.add(cv)
-    db.session.commit()
-    return jsonify({"message": "CV uploaded", "id": cv.id}), 201
+
 
 # Read / Download CV
 @app.route("/serve-cv/<int:cv_id>", methods=["GET"])
@@ -243,19 +232,62 @@ def delete_cv(cv_id):
 
 # ------------------ UserIDDoc CRUD ------------------
 
-# Create / Upload ID
+import traceback
+# ... keep your other imports and app/db setup ...
+
+# Create / Upload CV (fixed)
+@app.route("/cv", methods=["POST"])
+def upload_cv():
+    try:
+        user_code = request.form.get("user_code")
+        if not user_code:
+            return jsonify({"error": "user_code is required"}), 400
+
+        if "file" not in request.files:
+            return jsonify({"error": "No file uploaded"}), 400
+
+        file = request.files["file"]
+        if file.filename == "":
+            return jsonify({"error": "Filename missing"}), 400
+
+        filename = secure_filename(file.filename)
+        cv = UserCV(user_code=user_code, filename=filename, file_data=file.read())
+        db.session.add(cv)
+        db.session.commit()
+        return jsonify({"message": "CV uploaded", "id": cv.id}), 201
+
+    except Exception as e:
+        db.session.rollback()
+        app.logger.exception("Error uploading CV")
+        # Return a safe error message; don't expose internals in production
+        return jsonify({"error": "Internal server error", "details": str(e)}), 500
+
+
+# Create / Upload ID (fixed)
 @app.route("/id-doc", methods=["POST"])
 def upload_id_doc():
-    if "file" not in request.files:
-        return jsonify({"error": "No file uploaded"}), 400
-    file = request.files["file"]
-    if file.filename == "":
-        return jsonify({"error": "Filename missing"}), 400
-    filename = secure_filename(file.filename)
-    id_doc = UserIDDoc(filename=filename, file_data=file.read())
-    db.session.add(id_doc)
-    db.session.commit()
-    return jsonify({"message": "ID uploaded", "id": id_doc.id}), 201
+    try:
+        user_code = request.form.get("user_code")
+        if not user_code:
+            return jsonify({"error": "user_code is required"}), 400
+
+        if "file" not in request.files:
+            return jsonify({"error": "No file uploaded"}), 400
+
+        file = request.files["file"]
+        if file.filename == "":
+            return jsonify({"error": "Filename missing"}), 400
+
+        filename = secure_filename(file.filename)
+        id_doc = UserIDDoc(user_code=user_code, filename=filename, file_data=file.read())
+        db.session.add(id_doc)
+        db.session.commit()
+        return jsonify({"message": "ID uploaded", "id": id_doc.id}), 201
+
+    except Exception as e:
+        db.session.rollback()
+        app.logger.exception("Error uploading ID document")
+        return jsonify({"error": "Internal server error", "details": str(e)}), 500
 
 # Read / Download ID
 @app.route("/serve-id/<int:id_id>", methods=["GET"])
