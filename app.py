@@ -342,6 +342,40 @@ def view_submission(submission_id):
         download_name=sub.filename
     )
 
+# ----------------- View CV Inline -----------------
+@app.route("/view-cv/<int:cv_id>", methods=["GET"])
+def view_cv(cv_id):
+    doc = UserCV.query.get(cv_id)
+    if not doc:
+        return jsonify({"error": "CV not found"}), 404
+
+    mimetype = guess_mimetype(doc.filename)
+
+    # Inline view
+    return send_file(
+        BytesIO(doc.file_data),
+        mimetype=mimetype,
+        as_attachment=False,  # False allows browser to display inline
+        download_name=doc.filename
+    )
+
+# ----------------- View ID Inline -----------------
+@app.route("/view-id/<int:id_id>", methods=["GET"])
+def view_id(id_id):
+    doc = UserIDDoc.query.get(id_id)
+    if not doc:
+        return jsonify({"error": "ID not found"}), 404
+
+    mimetype = guess_mimetype(doc.filename)
+
+    return send_file(
+        BytesIO(doc.file_data),
+        mimetype=mimetype,
+        as_attachment=False,  # False allows browser to display inline
+        download_name=doc.filename
+    )
+
+
 
 # Delete ID
 @app.route("/id-doc/<int:id_id>", methods=["DELETE"])
