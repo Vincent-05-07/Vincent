@@ -343,6 +343,12 @@ def view_submission(submission_id):
     )
 
 # ----------------- View CV Inline -----------------
+def guess_mimetype(filename):
+    mimetype, _ = guess_type(filename)
+    return mimetype or 'application/octet-stream'
+
+
+# ----------------- View CV Inline -----------------
 @app.route("/view-cv/<int:cv_id>", methods=["GET"])
 def view_cv(cv_id):
     doc = UserCV.query.get(cv_id)
@@ -351,13 +357,13 @@ def view_cv(cv_id):
 
     mimetype = guess_mimetype(doc.filename)
 
-    # Inline view
     return send_file(
         BytesIO(doc.file_data),
         mimetype=mimetype,
-        as_attachment=False,  # False allows browser to display inline
+        as_attachment=False,   # Inline view
         download_name=doc.filename
     )
+
 
 # ----------------- View ID Inline -----------------
 @app.route("/view-id/<int:id_id>", methods=["GET"])
@@ -371,7 +377,7 @@ def view_id(id_id):
     return send_file(
         BytesIO(doc.file_data),
         mimetype=mimetype,
-        as_attachment=False,  # False allows browser to display inline
+        as_attachment=False,  # Inline view
         download_name=doc.filename
     )
 
