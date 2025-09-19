@@ -1,7 +1,7 @@
 import os
-import mimetypes
 from datetime import datetime
 from io import BytesIO
+from mimetypes import guess_type
 
 from flask import Flask, request, jsonify, send_file
 from flask_sqlalchemy import SQLAlchemy
@@ -380,7 +380,6 @@ def view_id(id_id):
         as_attachment=False,  # Inline view
         download_name=doc.filename
     )
-
 
 
 # Delete ID
