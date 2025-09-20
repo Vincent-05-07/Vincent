@@ -581,24 +581,6 @@ CORS(app, resources={
     r"/serve-image/*": {"origins": "http://127.0.0.1:5500"},
 })
 
-# Increase max upload size (50MB)
-app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024
-
-
-# 🌐 Root route
-@app.route('/')
-def index():
-    return jsonify({"message": "Flask API is live!"})
-
-# ❤️ Health check
-@app.route('/health', methods=['GET'])
-def health_check():
-    try:
-        conn = get_connection()
-        conn.close()
-        return jsonify({"status": "healthy"}), 200
-    except Exception as e:
-        return jsonify({"status": "unhealthy", "error": str(e)}), 500
 
 # 🖼️ Upload multiple images for a user
 @app.route('/upload-images', methods=['POST'])
