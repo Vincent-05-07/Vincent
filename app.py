@@ -434,13 +434,6 @@ def delete_id_doc(id_id):
     db.session.commit()
     return jsonify({"message": "ID deleted"}), 200
 
-@app.route("/serve-image/<int:image_id>", methods=["GET"])
-def serve_image(image_id):
-    img = FirmImage.query.get(image_id)
-    if not img:
-        return jsonify({"error": "Image not found"}), 404
-    return send_file(BytesIO(img.image_data), mimetype=guess_mimetype(img.filename),
-                     as_attachment=False, download_name=img.filename)
 
 # ----------------
 # DOCUMENTS (CV & ID)
