@@ -1,4 +1,5 @@
 import os
+import psycopg2
 from datetime import datetime
 from io import BytesIO
 from mimetypes import guess_type
