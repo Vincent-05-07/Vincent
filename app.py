@@ -1,5 +1,4 @@
 import os
-import psycopg2
 from datetime import datetime
 from io import BytesIO
 from mimetypes import guess_type
@@ -11,18 +10,16 @@ from sqlalchemy import func
 from flask_cors import CORS, cross_origin
 
 # ----------------
-# Flask App
+# Flask app + CORS
 # ----------------
 app = Flask(__name__)
-CORS(app, supports_credentials=True, origins="*")
-
+CORS(app, supports_credentials=True, origins="*")  # adjust origins in production
 
 # ----------------
 # Config
 # ----------------
-app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024  # 50 MB max
+app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024  # 50 MB
 
-# PostgreSQL config from env or fallback to SQLite
 pg_user = os.getenv("PGUSER")
 pg_pass = os.getenv("PGPASSWORD")
 pg_host = os.getenv("PGHOST")
@@ -41,24 +38,21 @@ app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 db = SQLAlchemy(app)
 
 # ----------------
-# CORS
-# ----------------
-# Use a more robust CORS configuration that explicitly supports credentials
-# and sets allowed methods.
-CORS(
-    app,
-    supports_credentials=True,
-    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allow_headers=["Content-Type", "Authorization", "X-Requested-With"]
-)
-
-# ----------------
 # Models
 # ----------------
+class FirmImage(db.Model):
+    __tablename__ = "firm_images"
+    id = db.Column(db.Integer, primary_key=True)
+    user_code = db.Column(db.String(80), index=True, nullable=False)
+    file_path = db.Column(db.String(255), nullable=False)
+    filename = db.Column(db.String(255), nullable=False)
+    image_data = db.Column(db.LargeBinary, nullable=False)
+    uploaded_at = db.Column(db.DateTime(timezone=True), server_default=func.now())
+
 class Document(db.Model):
     __tablename__ = "documents"
     id = db.Column(db.Integer, primary_key=True)
-    user_code = db.Column(db.String(50), index=True, nullable=False)
+    user_code = db.Column(db.String(80), index=True, nullable=False)
     cv_filename = db.Column(db.String(255), nullable=False)
     cv_data = db.Column(db.LargeBinary, nullable=False)
     id_filename = db.Column(db.String(255), nullable=False)
@@ -68,7 +62,7 @@ class Document(db.Model):
 class UserCV(db.Model):
     __tablename__ = "user_cv"
     id = db.Column(db.Integer, primary_key=True)
-    user_code = db.Column(db.String(50), nullable=False)
+    user_code = db.Column(db.String(80), nullable=False)
     filename = db.Column(db.String(255))
     file_path = db.Column(db.Text)
     file_data = db.Column(db.LargeBinary)
@@ -77,12 +71,11 @@ class UserCV(db.Model):
 class UserIDDoc(db.Model):
     __tablename__ = "user_id_doc"
     id = db.Column(db.Integer, primary_key=True)
-    user_code = db.Column(db.String(50), nullable=False)
+    user_code = db.Column(db.String(80), nullable=False)
     filename = db.Column(db.String(255))
     file_path = db.Column(db.Text)
     file_data = db.Column(db.LargeBinary)
     uploaded_at = db.Column(db.DateTime(timezone=True), server_default=func.now())
-
 
 class Assignment(db.Model):
     __tablename__ = "assignments"
@@ -106,7 +99,7 @@ class Submission(db.Model):
     description = db.Column(db.Text)
     updated_at = db.Column(db.DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
-# Create tables if not exist
+# Create tables
 with app.app_context():
     db.create_all()
 
@@ -116,19 +109,18 @@ with app.app_context():
 def safe_filename(file_obj):
     if not file_obj:
         return ""
-    name = getattr(file_obj, "filename", file_obj)
-    return secure_filename(name or "")
+    return secure_filename(getattr(file_obj, "filename", file_obj) or "")
 
 def guess_mimetype(filename):
-    mime, _ = mimetypes.guess_type(filename)
-    return mime or "application/octet-stream"
+    mimetype, _ = guess_type(filename)
+    return mimetype or "application/octet-stream"
 
 # ----------------
-# Root + Health
+# Root & Health
 # ----------------
 @app.route("/")
 def index():
-    return jsonify({"message": "Flask API (Postgres/Neon) is live!"})
+    return jsonify({"message": "Flask API (merged) is live!"})
 
 @app.route("/health")
 def health_check():
@@ -136,15 +128,104 @@ def health_check():
         db.session.execute("SELECT 1")
         return jsonify({"status": "healthy", "db": "connected"}), 200
     except Exception as e:
+        app.logger.exception("Health check failed")
         return jsonify({"status": "unhealthy", "error": str(e)}), 500
 
+# ----------------
+# FIRM IMAGES (upload / list / serve)
+# ----------------
+@app.route("/upload-images", methods=["POST", "OPTIONS"])
+@cross_origin()
+def upload_images():
+    """
+    POST form-data:
+      - user_code (string)
+      - images[] (file)  (multiple allowed)
+    Returns JSON with created image ids and serve URLs.
+    """
+    if request.method == "OPTIONS":
+        return "", 200
 
-# ------------------ UserCV CRUD ------------------
+    user_code = request.form.get("user_code")
+    images = request.files.getlist("images")
+    if not user_code or not images:
+        return jsonify({"error": "Missing user_code or images"}), 400
 
-# Create / Upload CV
+    created = []
+    try:
+        for idx, image_file in enumerate(images, start=1):
+            filename = safe_filename(image_file) or f"image_{idx}.jpg"
+            ext = os.path.splitext(filename)[1] or ".jpg"
+            filename_with_index = f"image_{idx}{ext}"
+            file_path = f"wil-firm-pics/{user_code}/{filename_with_index}"
+            data = image_file.read()
+            img = FirmImage(user_code=user_code, file_path=file_path, filename=filename_with_index, image_data=data)
+            db.session.add(img)
+            db.session.flush()  # get id
+            created.append({"id": img.id, "file_path": file_path})
+        db.session.commit()
+        base = request.host_url.rstrip('/')
+        urls = [f"{base}/serve-image/{c['id']}" for c in created]
+        return jsonify({"message": f"{len(created)} images saved", "files": created, "file_paths": urls}), 200
+    except Exception as e:
+        db.session.rollback()
+        app.logger.exception("Error uploading images")
+        return jsonify({"error": "Internal server error", "details": str(e)}), 500
 
+@app.route("/get-images/<user_code>", methods=["GET"])
+def get_images(user_code):
+    """
+    Returns JSON: { user_code, file_paths: ["/serve-image/<id>", ...] }
+    If none found returns an empty list (200) to be friendly to front-end.
+    """
+    try:
+        imgs = FirmImage.query.filter_by(user_code=user_code).all()
+        base = request.host_url.rstrip('/')
+        urls = [f"{base}/serve-image/{img.id}" for img in imgs]
+        return jsonify({"user_code": user_code, "file_paths": urls}), 200
+    except Exception as e:
+        app.logger.exception("Error in get_images")
+        return jsonify({"error": "Internal server error", "details": str(e)}), 500
 
-# Read / Download CV
+@app.route("/serve-image/<int:image_id>", methods=["GET"])
+def serve_image(image_id):
+    """
+    Serve binary image for given image id.
+    """
+    try:
+        img = FirmImage.query.get(image_id)
+        if not img:
+            return jsonify({"error": "Image not found"}), 404
+        mimetype = guess_mimetype(img.filename)
+        return send_file(BytesIO(img.image_data), mimetype=mimetype, as_attachment=False, download_name=img.filename)
+    except Exception as e:
+        app.logger.exception("Error serving image")
+        return jsonify({"error": "Internal server error", "details": str(e)}), 500
+
+# ----------------
+# UserCV CRUD
+# ----------------
+@app.route("/cv", methods=["POST"])
+def upload_cv():
+    try:
+        user_code = request.form.get("user_code")
+        if not user_code:
+            return jsonify({"error": "user_code is required"}), 400
+        if "file" not in request.files:
+            return jsonify({"error": "No file uploaded"}), 400
+        file = request.files["file"]
+        if file.filename == "":
+            return jsonify({"error": "Filename missing"}), 400
+        filename = safe_filename(file)
+        cv = UserCV(user_code=user_code, filename=filename, file_data=file.read())
+        db.session.add(cv)
+        db.session.commit()
+        return jsonify({"message": "CV uploaded", "id": cv.id}), 201
+    except Exception as e:
+        db.session.rollback()
+        app.logger.exception("Error uploading CV")
+        return jsonify({"error": "Internal server error", "details": str(e)}), 500
+
 @app.route("/serve-cv/<int:cv_id>", methods=["GET"])
 def serve_cv(cv_id):
     doc = UserCV.query.get(cv_id)
@@ -153,7 +234,6 @@ def serve_cv(cv_id):
     return send_file(BytesIO(doc.file_data), mimetype=guess_mimetype(doc.filename),
                      as_attachment=True, download_name=doc.filename)
 
-# Update CV
 @app.route("/cv/<int:cv_id>", methods=["PUT"])
 def update_cv(cv_id):
     doc = UserCV.query.get(cv_id)
@@ -164,12 +244,11 @@ def update_cv(cv_id):
     file = request.files["file"]
     if file.filename == "":
         return jsonify({"error": "Filename missing"}), 400
-    doc.filename = secure_filename(file.filename)
+    doc.filename = safe_filename(file)
     doc.file_data = file.read()
     db.session.commit()
     return jsonify({"message": "CV updated", "id": doc.id})
 
-# Delete CV
 @app.route("/cv/<int:cv_id>", methods=["DELETE"])
 def delete_cv(cv_id):
     doc = UserCV.query.get(cv_id)
@@ -179,68 +258,30 @@ def delete_cv(cv_id):
     db.session.commit()
     return jsonify({"message": "CV deleted"}), 200
 
-
-# ------------------ UserIDDoc CRUD ------------------
-
-import traceback
-# ... keep your other imports and app/db setup ...
-
-# Create / Upload CV (fixed)
-@app.route("/cv", methods=["POST"])
-def upload_cv():
-    try:
-        user_code = request.form.get("user_code")
-        if not user_code:
-            return jsonify({"error": "user_code is required"}), 400
-
-        if "file" not in request.files:
-            return jsonify({"error": "No file uploaded"}), 400
-
-        file = request.files["file"]
-        if file.filename == "":
-            return jsonify({"error": "Filename missing"}), 400
-
-        filename = secure_filename(file.filename)
-        cv = UserCV(user_code=user_code, filename=filename, file_data=file.read())
-        db.session.add(cv)
-        db.session.commit()
-        return jsonify({"message": "CV uploaded", "id": cv.id}), 201
-
-    except Exception as e:
-        db.session.rollback()
-        app.logger.exception("Error uploading CV")
-        # Return a safe error message; don't expose internals in production
-        return jsonify({"error": "Internal server error", "details": str(e)}), 500
-
-
-# Create / Upload ID (fixed)
+# ----------------
+# UserIDDoc CRUD
+# ----------------
 @app.route("/id-doc", methods=["POST"])
 def upload_id_doc():
     try:
         user_code = request.form.get("user_code")
         if not user_code:
             return jsonify({"error": "user_code is required"}), 400
-
         if "file" not in request.files:
             return jsonify({"error": "No file uploaded"}), 400
-
         file = request.files["file"]
         if file.filename == "":
             return jsonify({"error": "Filename missing"}), 400
-
-        filename = secure_filename(file.filename)
+        filename = safe_filename(file)
         id_doc = UserIDDoc(user_code=user_code, filename=filename, file_data=file.read())
         db.session.add(id_doc)
         db.session.commit()
         return jsonify({"message": "ID uploaded", "id": id_doc.id}), 201
-
     except Exception as e:
         db.session.rollback()
         app.logger.exception("Error uploading ID document")
         return jsonify({"error": "Internal server error", "details": str(e)}), 500
 
-
-# Read / Download ID
 @app.route("/serve-id/<int:id_id>", methods=["GET"])
 def serve_id(id_id):
     doc = UserIDDoc.query.get(id_id)
@@ -249,9 +290,6 @@ def serve_id(id_id):
     return send_file(BytesIO(doc.file_data), mimetype=guess_mimetype(doc.filename),
                      as_attachment=True, download_name=doc.filename)
 
-
-
-# Update ID
 @app.route("/id-doc/<int:id_id>", methods=["PUT"])
 def update_id_doc(id_id):
     doc = UserIDDoc.query.get(id_id)
@@ -262,81 +300,11 @@ def update_id_doc(id_id):
     file = request.files["file"]
     if file.filename == "":
         return jsonify({"error": "Filename missing"}), 400
-    doc.filename = secure_filename(file.filename)
+    doc.filename = safe_filename(file)
     doc.file_data = file.read()
     db.session.commit()
     return jsonify({"message": "ID updated", "id": doc.id})
 
-
-@app.route("/view-submission/<int:submission_id>", methods=["GET"])
-def view_submission(submission_id):
-    """
-    Serve a submission for inline viewing in the browser if supported.
-    """
-    sub = Submission.query.get(submission_id)
-    if not sub or not sub.file_data:
-        return jsonify({"error": "Submission not found"}), 404
-
-    # Guess the MIME type
-    mimetype = guess_mimetype(sub.filename)
-
-    # Determine if the file can be viewed inline (browser-friendly)
-    viewable_types = [
-        "application/pdf",  # PDF
-        "image/png", "image/jpeg", "image/jpg", "image/gif",  # Images
-        "text/plain",  # Text
-        "text/html"  # HTML
-    ]
-    as_attachment = mimetype not in viewable_types
-
-    return send_file(
-        BytesIO(sub.file_data),
-        mimetype=mimetype,
-        as_attachment=as_attachment,  # False for inline view
-        download_name=sub.filename
-    )
-
-# ----------------- View CV Inline -----------------
-def guess_mimetype(filename):
-    mimetype, _ = guess_type(filename)
-    return mimetype or 'application/octet-stream'
-
-
-# ----------------- View CV Inline -----------------
-@app.route("/view-cv/<int:cv_id>", methods=["GET"])
-def view_cv(cv_id):
-    doc = UserCV.query.get(cv_id)
-    if not doc:
-        return jsonify({"error": "CV not found"}), 404
-
-    mimetype = guess_mimetype(doc.filename)
-
-    return send_file(
-        BytesIO(doc.file_data),
-        mimetype=mimetype,
-        as_attachment=False,   # Inline view
-        download_name=doc.filename
-    )
-
-
-# ----------------- View ID Inline -----------------
-@app.route("/view-id/<int:id_id>", methods=["GET"])
-def view_id(id_id):
-    doc = UserIDDoc.query.get(id_id)
-    if not doc:
-        return jsonify({"error": "ID not found"}), 404
-
-    mimetype = guess_mimetype(doc.filename)
-
-    return send_file(
-        BytesIO(doc.file_data),
-        mimetype=mimetype,
-        as_attachment=False,  # Inline view
-        download_name=doc.filename
-    )
-
-
-# Delete ID
 @app.route("/id-doc/<int:id_id>", methods=["DELETE"])
 def delete_id_doc(id_id):
     doc = UserIDDoc.query.get(id_id)
@@ -346,9 +314,8 @@ def delete_id_doc(id_id):
     db.session.commit()
     return jsonify({"message": "ID deleted"}), 200
 
-
 # ----------------
-# DOCUMENTS (CV & ID)
+# Documents (combined CV + ID upload)
 # ----------------
 @app.route("/documents", methods=["POST", "OPTIONS"])
 @cross_origin()
@@ -373,7 +340,8 @@ def upload_documents():
         return jsonify({"message": "Documents uploaded", "id": doc.id}), 201
     except Exception as e:
         db.session.rollback()
-        return jsonify({"error": str(e)}), 500
+        app.logger.exception("Error uploading documents")
+        return jsonify({"error": "Internal server error", "details": str(e)}), 500
 
 @app.route("/documents/<user_code>", methods=["GET"])
 def list_documents(user_code):
@@ -405,7 +373,7 @@ def serve_document(doc_id, filetype):
         return jsonify({"error": "Invalid filetype"}), 400
 
 # ----------------
-# ASSIGNMENTS
+# Assignments
 # ----------------
 @app.route("/api/assignments", methods=["POST", "OPTIONS"])
 @cross_origin()
@@ -453,7 +421,8 @@ def create_assignment():
         }), 201
     except Exception as e:
         db.session.rollback()
-        return jsonify({"error": str(e)}), 500
+        app.logger.exception("Error creating assignment")
+        return jsonify({"error": "Internal server error", "details": str(e)}), 500
 
 @app.route("/api/assignments", methods=["GET"])
 def list_assignments():
@@ -485,7 +454,7 @@ def serve_assignment_file(assignment_id):
                      as_attachment=True, download_name=a.file_filename)
 
 # ----------------
-# SUBMISSIONS
+# Submissions
 # ----------------
 @app.route("/api/assignments/<assignment_id>/submissions", methods=["PUT", "OPTIONS"])
 @cross_origin()
@@ -518,7 +487,8 @@ def update_submission(assignment_id):
         return jsonify({"message": "Submission updated", "id": sub.id, "updated_at": sub.updated_at.isoformat(), "file_url": file_url}), 200
     except Exception as e:
         db.session.rollback()
-        return jsonify({"error": str(e)}), 500
+        app.logger.exception("Error updating submission")
+        return jsonify({"error": "Internal server error", "details": str(e)}), 500
 
 @app.route("/api/assignments/<assignment_id>/submissions", methods=["GET"])
 def list_submissions_for_assignment(assignment_id):
@@ -550,7 +520,8 @@ def delete_submission(assignment_id):
         return jsonify({"message": f"Submission deleted for user {user_code}"}), 200
     except Exception as e:
         db.session.rollback()
-        return jsonify({"error": str(e)}), 500
+        app.logger.exception("Error deleting submission")
+        return jsonify({"error": "Internal server error", "details": str(e)}), 500
 
 @app.route("/serve-submission-file/<int:submission_id>", methods=["GET"])
 def serve_submission_file(submission_id):
@@ -560,101 +531,37 @@ def serve_submission_file(submission_id):
     return send_file(BytesIO(s.file_data), mimetype=guess_mimetype(s.filename),
                      as_attachment=True, download_name=s.filename)
 
+@app.route("/view-submission/<int:submission_id>", methods=["GET"])
+def view_submission(submission_id):
+    sub = Submission.query.get(submission_id)
+    if not sub or not sub.file_data:
+        return jsonify({"error": "Submission not found"}), 404
+    mimetype = guess_mimetype(sub.filename)
+    viewable_types = ["application/pdf", "image/png", "image/jpeg", "image/jpg", "image/gif", "text/plain", "text/html"]
+    as_attachment = mimetype not in viewable_types
+    return send_file(BytesIO(sub.file_data), mimetype=mimetype, as_attachment=as_attachment, download_name=sub.filename)
 
-
-# Only allow CORS for your dashboard origin on the image endpoints
-CORS(app, resources={
-    r"/get-images/*": {"origins": "http://127.0.0.1:5500"},
-    r"/serve-image/*": {"origins": "http://127.0.0.1:5500"},
-})
-
-# 🖼️ Upload multiple images for a user
-@app.route('/upload-images', methods=['POST'])
-def upload_images():
-    user_code = request.form.get('user_code')
-    images = request.files.getlist('images')
-    if not user_code or not images:
-        return jsonify({"error": "Missing user_code or images"}), 400
-
-    try:
-        conn = get_connection()
-        cur = conn.cursor()
-        records = []
-        for index, image_file in enumerate(images, start=1):
-            file_path = f"wil-firm-pics/{user_code}/image_{index}.jpg"
-            image_data = psycopg2.Binary(image_file.read())
-            records.append((user_code, file_path, image_data))
-
-        cur.executemany("""
-            INSERT INTO firm_images (user_code, file_path, image_data)
-            VALUES (%s, %s, %s)
-        """, records)
-
-        conn.commit()
-        cur.close()
-        conn.close()
-        return jsonify({
-            "message": f"{len(images)} images saved for user {user_code}",
-            "file_paths": [r[1] for r in records]
-        }), 200
-
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-# 📁 Retrieve image URLs for a user
-@app.route('/get-images/<user_code>', methods=['GET'])
-def get_images(user_code):
-    try:
-        conn = get_connection()
-        cur = conn.cursor()
-        cur.execute("""
-            SELECT file_path FROM firm_images WHERE user_code = %s
-        """, (user_code,))
-        rows = cur.fetchall()
-        cur.close()
-        conn.close()
-
-        base_url = request.host_url.rstrip('/')
-        urls = [
-            f"{base_url}/serve-image/{user_code}/{os.path.basename(row[0])}"
-            for row in rows
-        ]
-        return jsonify({
-            "user_code": user_code,
-            "file_paths": urls
-        }), 200
-
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-# 📤 Serve an actual image
-@app.route('/serve-image/<user_code>/<filename>', methods=['GET'])
-def serve_image(user_code, filename):
-    try:
-        conn = get_connection()
-        cur = conn.cursor()
-        cur.execute("""
-            SELECT image_data FROM firm_images
-            WHERE user_code = %s AND file_path LIKE %s
-            LIMIT 1
-        """, (user_code, f"%{filename}"))
-        row = cur.fetchone()
-        cur.close()
-        conn.close()
-
-        if not row:
-            return jsonify({"error": "Image not found"}), 404
-
-        return send_file(
-            BytesIO(row[0]),
-            mimetype='image/jpeg',
-            as_attachment=False
-        )
-
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
 # ----------------
-# Run App
+# CV / ID inline view helpers
+# ----------------
+@app.route("/view-cv/<int:cv_id>", methods=["GET"])
+def view_cv(cv_id):
+    doc = UserCV.query.get(cv_id)
+    if not doc:
+        return jsonify({"error": "CV not found"}), 404
+    mimetype = guess_mimetype(doc.filename)
+    return send_file(BytesIO(doc.file_data), mimetype=mimetype, as_attachment=False, download_name=doc.filename)
+
+@app.route("/view-id/<int:id_id>", methods=["GET"])
+def view_id(id_id):
+    doc = UserIDDoc.query.get(id_id)
+    if not doc:
+        return jsonify({"error": "ID not found"}), 404
+    mimetype = guess_mimetype(doc.filename)
+    return send_file(BytesIO(doc.file_data), mimetype=mimetype, as_attachment=False, download_name=doc.filename)
+
+# ----------------
+# Run
 # ----------------
 if __name__ == "__main__":
     debug = os.getenv("FLASK_DEBUG", "false").lower() in ("1", "true")
