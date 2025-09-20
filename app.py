@@ -49,25 +49,12 @@ CORS(
     app,
     supports_credentials=True,
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allow_headers=["Content-Type", "Authorization", "X-Requested-With"], 
-     resources={
-    r"/get-images/*": {"origins": "http://127.0.0.1:5500"},
-    r"/serve-image/*": {"origins": "http://127.0.0.1:5500"},
-}
+    allow_headers=["Content-Type", "Authorization", "X-Requested-With"]
 )
 
 # ----------------
 # Models
 # ----------------
-class FirmImage(db.Model):
-    __tablename__ = "firm_images"
-    id = db.Column(db.Integer, primary_key=True)
-    user_code = db.Column(db.String(50), index=True, nullable=False)
-    file_path = db.Column(db.String(255), nullable=False)
-    filename = db.Column(db.String(255), nullable=False)
-    image_data = db.Column(db.LargeBinary, nullable=False)
-    uploaded_at = db.Column(db.DateTime(timezone=True), server_default=func.now())
-
 class Document(db.Model):
     __tablename__ = "documents"
     id = db.Column(db.Integer, primary_key=True)
@@ -151,91 +138,7 @@ def health_check():
     except Exception as e:
         return jsonify({"status": "unhealthy", "error": str(e)}), 500
 
-# ----------------
-# FIRM IMAGES
-# ----------------
-@app.route('/upload-images', methods=['POST'])
-def upload_images():
-    user_code = request.form.get('user_code')
-    images = request.files.getlist('images')
-    if not user_code or not images:
-        return jsonify({"error": "Missing user_code or images"}), 400
 
-    try:
-        conn = get_connection()
-        cur = conn.cursor()
-        records = []
-        for index, image_file in enumerate(images, start=1):
-            file_path = f"wil-firm-pics/{user_code}/image_{index}.jpg"
-            image_data = psycopg2.Binary(image_file.read())
-            records.append((user_code, file_path, image_data))
-
-        cur.executemany("""
-            INSERT INTO firm_images (user_code, file_path, image_data)
-            VALUES (%s, %s, %s)
-        """, records)
-
-        conn.commit()
-        cur.close()
-        conn.close()
-        return jsonify({
-            "message": f"{len(images)} images saved for user {user_code}",
-            "file_paths": [r[1] for r in records]
-        }), 200
-
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-@app.route('/get-images/<user_code>', methods=['GET'])
-def get_images(user_code):
-    try:
-        conn = get_connection()
-        cur = conn.cursor()
-        cur.execute("""
-            SELECT file_path FROM firm_images WHERE user_code = %s
-        """, (user_code,))
-        rows = cur.fetchall()
-        cur.close()
-        conn.close()
-
-        base_url = request.host_url.rstrip('/')
-        urls = [
-            f"{base_url}/serve-image/{user_code}/{os.path.basename(row[0])}"
-            for row in rows
-        ]
-        return jsonify({
-            "user_code": user_code,
-            "file_paths": urls
-        }), 200
-
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-@app.route('/serve-image/<user_code>/<filename>', methods=['GET'])
-def serve_image(user_code, filename):
-    try:
-        conn = get_connection()
-        cur = conn.cursor()
-        cur.execute("""
-            SELECT image_data FROM firm_images
-            WHERE user_code = %s AND file_path LIKE %s
-            LIMIT 1
-        """, (user_code, f"%{filename}"))
-        row = cur.fetchone()
-        cur.close()
-        conn.close()
-
-        if not row:
-            return jsonify({"error": "Image not found"}), 404
-
-        return send_file(
-            BytesIO(row[0]),
-            mimetype='image/jpeg',
-            as_attachment=False
-        )
-
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
 # ------------------ UserCV CRUD ------------------
 
 # Create / Upload CV
@@ -336,6 +239,7 @@ def upload_id_doc():
         app.logger.exception("Error uploading ID document")
         return jsonify({"error": "Internal server error", "details": str(e)}), 500
 
+
 # Read / Download ID
 @app.route("/serve-id/<int:id_id>", methods=["GET"])
 def serve_id(id_id):
@@ -344,6 +248,8 @@ def serve_id(id_id):
         return jsonify({"error": "ID not found"}), 404
     return send_file(BytesIO(doc.file_data), mimetype=guess_mimetype(doc.filename),
                      as_attachment=True, download_name=doc.filename)
+
+
 
 # Update ID
 @app.route("/id-doc/<int:id_id>", methods=["PUT"])
@@ -360,6 +266,7 @@ def update_id_doc(id_id):
     doc.file_data = file.read()
     db.session.commit()
     return jsonify({"message": "ID updated", "id": doc.id})
+
 
 @app.route("/view-submission/<int:submission_id>", methods=["GET"])
 def view_submission(submission_id):
@@ -653,6 +560,99 @@ def serve_submission_file(submission_id):
     return send_file(BytesIO(s.file_data), mimetype=guess_mimetype(s.filename),
                      as_attachment=True, download_name=s.filename)
 
+
+
+# Only allow CORS for your dashboard origin on the image endpoints
+CORS(app, resources={
+    r"/get-images/*": {"origins": "http://127.0.0.1:5500"},
+    r"/serve-image/*": {"origins": "http://127.0.0.1:5500"},
+})
+
+# 🖼️ Upload multiple images for a user
+@app.route('/upload-images', methods=['POST'])
+def upload_images():
+    user_code = request.form.get('user_code')
+    images = request.files.getlist('images')
+    if not user_code or not images:
+        return jsonify({"error": "Missing user_code or images"}), 400
+
+    try:
+        conn = get_connection()
+        cur = conn.cursor()
+        records = []
+        for index, image_file in enumerate(images, start=1):
+            file_path = f"wil-firm-pics/{user_code}/image_{index}.jpg"
+            image_data = psycopg2.Binary(image_file.read())
+            records.append((user_code, file_path, image_data))
+
+        cur.executemany("""
+            INSERT INTO firm_images (user_code, file_path, image_data)
+            VALUES (%s, %s, %s)
+        """, records)
+
+        conn.commit()
+        cur.close()
+        conn.close()
+        return jsonify({
+            "message": f"{len(images)} images saved for user {user_code}",
+            "file_paths": [r[1] for r in records]
+        }), 200
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+# 📁 Retrieve image URLs for a user
+@app.route('/get-images/<user_code>', methods=['GET'])
+def get_images(user_code):
+    try:
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT file_path FROM firm_images WHERE user_code = %s
+        """, (user_code,))
+        rows = cur.fetchall()
+        cur.close()
+        conn.close()
+
+        base_url = request.host_url.rstrip('/')
+        urls = [
+            f"{base_url}/serve-image/{user_code}/{os.path.basename(row[0])}"
+            for row in rows
+        ]
+        return jsonify({
+            "user_code": user_code,
+            "file_paths": urls
+        }), 200
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+# 📤 Serve an actual image
+@app.route('/serve-image/<user_code>/<filename>', methods=['GET'])
+def serve_image(user_code, filename):
+    try:
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT image_data FROM firm_images
+            WHERE user_code = %s AND file_path LIKE %s
+            LIMIT 1
+        """, (user_code, f"%{filename}"))
+        row = cur.fetchone()
+        cur.close()
+        conn.close()
+
+        if not row:
+            return jsonify({"error": "Image not found"}), 404
+
+        return send_file(
+            BytesIO(row[0]),
+            mimetype='image/jpeg',
+            as_attachment=False
+        )
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 # ----------------
 # Run App
 # ----------------
