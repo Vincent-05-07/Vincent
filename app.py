@@ -25,6 +25,15 @@ CORS(app, supports_credentials=True, origins="*")
 # ----------------
 app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024  # 50 MB max
 
+def get_connection():
+    return psycopg2.connect(
+        dbname=os.getenv("PGDATABASE"),
+        user=os.getenv("PGUSER"),
+        password=os.getenv("PGPASSWORD"),
+        host=os.getenv("PGHOST"),
+        port=os.getenv("PGPORT", "5432"),
+        sslmode=os.getenv("PGSSLMODE", "require")
+    )
 # PostgreSQL config from env or fallback to SQLite
 pg_user = os.getenv("PGUSER")
 pg_pass = os.getenv("PGPASSWORD")
