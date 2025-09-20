@@ -49,7 +49,11 @@ CORS(
     app,
     supports_credentials=True,
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allow_headers=["Content-Type", "Authorization", "X-Requested-With"]
+    allow_headers=["Content-Type", "Authorization", "X-Requested-With"], 
+     resources={
+    r"/get-images/*": {"origins": "http://127.0.0.1:5500"},
+    r"/serve-image/*": {"origins": "http://127.0.0.1:5500"},
+}
 )
 
 # ----------------
