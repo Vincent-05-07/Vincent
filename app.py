@@ -558,21 +558,25 @@ def list_submissions_for_assignment(assignment_id):
         })
     return jsonify({"submissions": result})
 
-@app.route("/api/assignments/<assignment_id>/submissions", methods=["DELETE"])
-def delete_submission(assignment_id):
-    user_code = request.args.get("user_code")
-    if not user_code:
-        return jsonify({"error": "user_code required"}), 400
-    sub = Submission.query.filter_by(assignment_id=assignment_id, user_code=user_code).first()
-    if not sub:
-        return jsonify({"error": "Submission not found"}), 404
+@app.route("/api/assignments/<assignment_id>", methods=["DELETE", "OPTIONS"])
+@cross_origin()
+def delete_assignment(assignment_id):
+    # Handle preflight OPTIONS request for CORS
+    if request.method == "OPTIONS":
+        return "", 200
+
+    assignment = Assignment.query.get(assignment_id)
+    if not assignment:
+        return jsonify({"error": "Assignment not found"}), 404
+
     try:
-        db.session.delete(sub)
+        db.session.delete(assignment)
         db.session.commit()
-        return jsonify({"message": f"Submission deleted for user {user_code}"}), 200
+        return jsonify({"message": "Assignment deleted successfully"}), 200
     except Exception as e:
         db.session.rollback()
         return jsonify({"error": str(e)}), 500
+
 
 @app.route("/serve-submission-file/<int:submission_id>", methods=["GET"])
 def serve_submission_file(submission_id):
