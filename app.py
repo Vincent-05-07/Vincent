@@ -550,11 +550,13 @@ def serve_assignment_file(assignment_id):
     return send_file(BytesIO(a.file_data), mimetype=guess_mimetype(a.file_filename),
                      as_attachment=True, download_name=a.file_filename)
 
+from flask import url_for
+
 @app.route("/api/assignments/<assignment_id>/file", methods=["PUT", "OPTIONS"])
 @cross_origin()
 def update_assignment_file(assignment_id):
     if request.method == "OPTIONS":
-        return "", 200  # Preflight
+        return "", 200  # Preflight (CORS headers applied by decorator)
 
     assignment = Assignment.query.get(assignment_id)
     if not assignment:
@@ -564,17 +566,25 @@ def update_assignment_file(assignment_id):
         return jsonify({"error": "No file uploaded"}), 400
 
     file = request.files["file"]
+    if file.filename == "":
+        return jsonify({"error": "Filename missing"}), 400
+
     assignment.file_filename = secure_filename(file.filename)
     assignment.file_data = file.read()
 
     try:
         db.session.commit()
-        return jsonify({"message": "Assignment file updated", "id": assignment.id}), 200
+        # Construct a public URL for the file endpoint. This assumes your serve endpoint is /serve-assignment-file/<id>
+        file_url = f"/serve-assignment-file/{assignment.id}"
+        return jsonify({
+            "message": "Assignment file updated",
+            "id": assignment.id,
+            "file_url": file_url
+        }), 200
     except Exception as e:
         db.session.rollback()
-        return jsonify({"error": str(e)}), 500
-
-
+        app.logger.exception("Failed updating assignment file")
+        return jsonify({"error": "Internal server error", "details": str(e)}), 500
 
 # ----------------
 # SUBMISSIONS
