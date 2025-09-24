@@ -550,6 +550,32 @@ def serve_assignment_file(assignment_id):
     return send_file(BytesIO(a.file_data), mimetype=guess_mimetype(a.file_filename),
                      as_attachment=True, download_name=a.file_filename)
 
+@app.route("/api/assignments/<assignment_id>/file", methods=["PUT", "OPTIONS"])
+@cross_origin()
+def update_assignment_file(assignment_id):
+    if request.method == "OPTIONS":
+        return "", 200  # Preflight
+
+    assignment = Assignment.query.get(assignment_id)
+    if not assignment:
+        return jsonify({"error": "Assignment not found"}), 404
+
+    if "file" not in request.files:
+        return jsonify({"error": "No file uploaded"}), 400
+
+    file = request.files["file"]
+    assignment.file_filename = secure_filename(file.filename)
+    assignment.file_data = file.read()
+
+    try:
+        db.session.commit()
+        return jsonify({"message": "Assignment file updated", "id": assignment.id}), 200
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({"error": str(e)}), 500
+
+
+
 # ----------------
 # SUBMISSIONS
 # ----------------
