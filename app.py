@@ -180,30 +180,52 @@ def serve_cv(cv_id):
                      as_attachment=True, download_name=doc.filename)
 
 # Update CV
-@app.route("/cv/<int:cv_id>", methods=["PUT"])
+@app.route("/cv/<int:cv_id>", methods=["PUT", "OPTIONS"])
+@cross_origin()
 def update_cv(cv_id):
+    if request.method == "OPTIONS":
+        return "", 200  # Preflight response
+
     doc = UserCV.query.get(cv_id)
     if not doc:
         return jsonify({"error": "CV not found"}), 404
+
     if "file" not in request.files:
         return jsonify({"error": "No file uploaded"}), 400
-    file = request.files["file"]
-    if file.filename == "":
-        return jsonify({"error": "Filename missing"}), 400
-    doc.filename = secure_filename(file.filename)
-    doc.file_data = file.read()
-    db.session.commit()
-    return jsonify({"message": "CV updated", "id": doc.id})
+
+    try:
+        file = request.files["file"]
+        if file.filename == "":
+            return jsonify({"error": "Filename missing"}), 400
+
+        doc.filename = secure_filename(file.filename)
+        doc.file_data = file.read()
+        db.session.commit()
+        return jsonify({"message": "CV updated", "id": doc.id}), 200
+
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({"error": "Internal server error", "details": str(e)}), 500
 
 # Delete CV
-@app.route("/cv/<int:cv_id>", methods=["DELETE"])
+@app.route("/cv/<int:cv_id>", methods=["DELETE", "OPTIONS"])
+@cross_origin()
 def delete_cv(cv_id):
+    if request.method == "OPTIONS":
+        return "", 200  # Preflight response
+
     doc = UserCV.query.get(cv_id)
     if not doc:
         return jsonify({"error": "CV not found"}), 404
-    db.session.delete(doc)
-    db.session.commit()
-    return jsonify({"message": "CV deleted"}), 200
+
+    try:
+        db.session.delete(doc)
+        db.session.commit()
+        return jsonify({"message": "CV deleted"}), 200
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({"error": "Internal server error", "details": str(e)}), 500
+
 
 
 # ------------------ UserIDDoc CRUD ------------------
@@ -275,20 +297,32 @@ def serve_id(id_id):
                      as_attachment=True, download_name=doc.filename)
 
 # Update ID
-@app.route("/id-doc/<int:id_id>", methods=["PUT"])
+@app.route("/id-doc/<int:id_id>", methods=["PUT", "OPTIONS"])
+@cross_origin()
 def update_id_doc(id_id):
+    if request.method == "OPTIONS":
+        return "", 200
+
     doc = UserIDDoc.query.get(id_id)
     if not doc:
         return jsonify({"error": "ID not found"}), 404
+
     if "file" not in request.files:
         return jsonify({"error": "No file uploaded"}), 400
-    file = request.files["file"]
-    if file.filename == "":
-        return jsonify({"error": "Filename missing"}), 400
-    doc.filename = secure_filename(file.filename)
-    doc.file_data = file.read()
-    db.session.commit()
-    return jsonify({"message": "ID updated", "id": doc.id})
+
+    try:
+        file = request.files["file"]
+        if file.filename == "":
+            return jsonify({"error": "Filename missing"}), 400
+
+        doc.filename = secure_filename(file.filename)
+        doc.file_data = file.read()
+        db.session.commit()
+        return jsonify({"message": "ID updated", "id": doc.id}), 200
+
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({"error": "Internal server error", "details": str(e)}), 500
 
 @app.route("/view-submission/<int:submission_id>", methods=["GET"])
 def view_submission(submission_id):
@@ -359,14 +393,24 @@ def view_id(id_id):
 
 
 # Delete ID
-@app.route("/id-doc/<int:id_id>", methods=["DELETE"])
+@app.route("/id-doc/<int:id_id>", methods=["DELETE", "OPTIONS"])
+@cross_origin()
 def delete_id_doc(id_id):
+    if request.method == "OPTIONS":
+        return "", 200
+
     doc = UserIDDoc.query.get(id_id)
     if not doc:
         return jsonify({"error": "ID not found"}), 404
-    db.session.delete(doc)
-    db.session.commit()
-    return jsonify({"message": "ID deleted"}), 200
+
+    try:
+        db.session.delete(doc)
+        db.session.commit()
+        return jsonify({"message": "ID deleted"}), 200
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({"error": "Internal server error", "details": str(e)}), 500
+
 
 
 # ----------------
