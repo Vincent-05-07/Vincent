@@ -552,39 +552,58 @@ def serve_assignment_file(assignment_id):
 
 from flask import url_for
 
-@app.route("/api/assignments/<assignment_id>/file", methods=["PUT", "OPTIONS"])
+@app.route("/api/assignments/<assignment_id>", methods=["PUT", "OPTIONS"])
 @cross_origin()
-def update_assignment_file(assignment_id):
+def update_assignment(assignment_id):
     if request.method == "OPTIONS":
-        return "", 200  # Preflight (CORS headers applied by decorator)
+        return "", 200  # Preflight CORS
 
     assignment = Assignment.query.get(assignment_id)
     if not assignment:
         return jsonify({"error": "Assignment not found"}), 404
 
-    if "file" not in request.files:
-        return jsonify({"error": "No file uploaded"}), 400
+    # Metadata from form fields
+    title = request.form.get("title")
+    description = request.form.get("description")
+    deadline_iso = request.form.get("deadline_iso")
+    status = request.form.get("status")
 
-    file = request.files["file"]
-    if file.filename == "":
-        return jsonify({"error": "Filename missing"}), 400
+    if title:
+        assignment.title = title
+    if description:
+        assignment.description = description
+    if deadline_iso:
+        assignment.deadline_iso = deadline_iso
+    if status:
+        assignment.status = status
 
-    assignment.file_filename = secure_filename(file.filename)
-    assignment.file_data = file.read()
+    # Handle file (optional)
+    if "file" in request.files:
+        file = request.files["file"]
+        if file and file.filename.strip() != "":
+            assignment.file_filename = secure_filename(file.filename)
+            assignment.file_data = file.read()
 
     try:
         db.session.commit()
-        # Construct a public URL for the file endpoint. This assumes your serve endpoint is /serve-assignment-file/<id>
-        file_url = f"/serve-assignment-file/{assignment.id}"
+        file_url = f"/serve-assignment-file/{assignment.id}" if assignment.file_filename else None
         return jsonify({
-            "message": "Assignment file updated",
+            "message": "Assignment updated successfully",
             "id": assignment.id,
+            "title": assignment.title,
+            "description": assignment.description,
+            "deadline_iso": assignment.deadline_iso,
+            "status": assignment.status,
             "file_url": file_url
         }), 200
     except Exception as e:
         db.session.rollback()
-        app.logger.exception("Failed updating assignment file")
-        return jsonify({"error": "Internal server error", "details": str(e)}), 500
+        app.logger.exception("Failed updating assignment")
+        return jsonify({
+            "error": "Internal server error",
+            "details": str(e)
+        }), 500
+
 
 # ----------------
 # SUBMISSIONS
