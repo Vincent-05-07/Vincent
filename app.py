@@ -352,6 +352,32 @@ def view_submission(submission_id):
         download_name=sub.filename
     )
 
+@app.route("/api/assignments/<assignment_id>/submissions/<int:submission_id>", methods=["DELETE", "OPTIONS"])
+@cross_origin()
+def delete_submission(assignment_id, submission_id):
+    if request.method == "OPTIONS":
+        return "", 200
+
+    sub = Submission.query.get(submission_id)
+    if not sub or sub.assignment_id != assignment_id:
+        return jsonify({"error": "Submission not found"}), 404
+
+    assignment = Assignment.query.get(assignment_id)
+    if not assignment:
+        return jsonify({"error": "Assignment not found"}), 404
+
+    if assignment.status != "open":
+        return jsonify({"error": "Cannot delete submission for a closed assignment"}), 400
+
+    try:
+        db.session.delete(sub)
+        db.session.commit()
+        return jsonify({"message": "Submission deleted successfully"}), 200
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({"error": str(e)}), 500
+
+
 # ----------------- View CV Inline -----------------
 def guess_mimetype(filename):
     mimetype, _ = guess_type(filename)
