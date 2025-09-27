@@ -3,12 +3,18 @@ from datetime import datetime
 from io import BytesIO
 from mimetypes import guess_type
 
+
+import mimetypes
+
+
 #the imports for images
 import psycopg2
 #import for images
 
 from flask import Flask, request, jsonify, send_file
 from flask_sqlalchemy import SQLAlchemy
+from sqlalchemy.exc import SQLAlchemyError
+
 from werkzeug.utils import secure_filename
 from sqlalchemy import func
 from flask_cors import CORS, cross_origin
@@ -477,65 +483,6 @@ def delete_id_doc(id_id):
         db.session.rollback()
         return jsonify({"error": "Internal server error", "details": str(e)}), 500
 
-
-
-# ----------------
-# DOCUMENTS (CV & ID)
-# ----------------
-@app.route("/documents", methods=["POST", "OPTIONS"])
-@cross_origin()
-def upload_documents():
-    if request.method == "OPTIONS":
-        return "", 200
-    user_code = request.form.get("user_code")
-    if not user_code or "cvFile" not in request.files or "idFile" not in request.files:
-        return jsonify({"error": "user_code, CV and ID are required"}), 400
-    try:
-        cv = request.files["cvFile"]
-        idf = request.files["idFile"]
-        doc = Document(
-            user_code=user_code,
-            cv_filename=safe_filename(cv),
-            cv_data=cv.read(),
-            id_filename=safe_filename(idf),
-            id_data=idf.read()
-        )
-        db.session.add(doc)
-        db.session.commit()
-        return jsonify({"message": "Documents uploaded", "id": doc.id}), 201
-    except Exception as e:
-        db.session.rollback()
-        return jsonify({"error": str(e)}), 500
-
-@app.route("/documents/<user_code>", methods=["GET"])
-def list_documents(user_code):
-    docs = Document.query.filter_by(user_code=user_code).all()
-    result = []
-    for d in docs:
-        result.append({
-            "id": d.id,
-            "cv_filename": d.cv_filename,
-            "cv_url": f"/serve-document/{d.id}/cv",
-            "id_filename": d.id_filename,
-            "id_url": f"/serve-document/{d.id}/id",
-            "uploaded_at": d.uploaded_at.isoformat() if d.uploaded_at else None
-        })
-    return jsonify(result)
-
-@app.route("/serve-document/<int:doc_id>/<string:filetype>", methods=["GET"])
-def serve_document(doc_id, filetype):
-    doc = Document.query.get(doc_id)
-    if not doc:
-        return jsonify({"error": "Document not found"}), 404
-    if filetype == "cv":
-        return send_file(BytesIO(doc.cv_data), mimetype=guess_mimetype(doc.cv_filename),
-                         as_attachment=True, download_name=doc.cv_filename)
-    elif filetype == "id":
-        return send_file(BytesIO(doc.id_data), mimetype=guess_mimetype(doc.id_filename),
-                         as_attachment=True, download_name=doc.id_filename)
-    else:
-        return jsonify({"error": "Invalid filetype"}), 400
-
 # ----------------
 # ASSIGNMENTS
 # ----------------
@@ -849,16 +796,6 @@ def serve_image(user_code, filename):
 # ----------------
 # CREATE / UPLOAD
 # ----------------
-from flask import request, jsonify, send_file
-from werkzeug.utils import secure_filename
-from io import BytesIO
-from datetime import datetime
-import mimetypes
-
-from your_app import app, db  # adjust to your project
-from your_app.models import FirmProof  # adjust import
-from flask_cors import cross_origin
-from sqlalchemy.exc import SQLAlchemyError
 
 def guess_mimetype(filename, fallback=None):
     """
