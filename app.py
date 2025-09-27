@@ -67,6 +67,16 @@ CORS(
 # ----------------
 # Models
 # ----------------
+# --- Model: matches your CREATE TABLE firm_proofs SQL ---
+class FirmProof(db.Model):
+    __tablename__ = "firm_proofs"
+    id = db.Column(db.Integer, primary_key=True)
+    user_code = db.Column(db.String(50), nullable=False, unique=True, index=True)
+    file_path = db.Column(db.String(255), nullable=False)   # original filename
+    file_data = db.Column(db.LargeBinary, nullable=False)   # actual file
+    uploaded_at = db.Column(db.DateTime(timezone=True), server_default=func.now())
+
+    
 class FirmImage(db.Model):
     __tablename__ = "firm_images"
     id = db.Column(db.Integer, primary_key=True)
@@ -805,6 +815,145 @@ def serve_image(user_code, filename):
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+# ----------------
+# CREATE / UPLOAD
+# ----------------
+@app.route("/firm-proof", methods=["POST", "OPTIONS"])
+@cross_origin()
+def upload_firm_proof():
+    if request.method == "OPTIONS":
+        return "", 200
+
+    try:
+        user_code = request.form.get("user_code")
+        if not user_code:
+            return jsonify({"error": "user_code is required"}), 400
+
+        if "file" not in request.files:
+            return jsonify({"error": "No file uploaded"}), 400
+
+        file = request.files["file"]
+        if file.filename.strip() == "":
+            return jsonify({"error": "Filename missing"}), 400
+
+        filename = secure_filename(file.filename)
+
+        # Check if proof already exists for this firm
+        existing = FirmProof.query.filter_by(user_code=user_code).first()
+        if existing:
+            return jsonify({"error": "Proof already uploaded for this firm"}), 400
+
+        proof = FirmProof(
+            user_code=user_code,
+            file_path=filename,
+            file_data=file.read()
+        )
+        db.session.add(proof)
+        db.session.commit()
+        return jsonify({"message": "Proof uploaded", "id": proof.id}), 201
+
+    except Exception as e:
+        db.session.rollback()
+        app.logger.exception("Error uploading firm proof")
+        return jsonify({"error": "Internal server error", "details": str(e)}), 500
+
+# ----------------
+# READ / LIST BY USER
+# ----------------
+@app.route("/firm-proof/<user_code>", methods=["GET", "OPTIONS"])
+@cross_origin()
+def get_firm_proof(user_code):
+    if request.method == "OPTIONS":
+        return "", 200
+
+    proof = FirmProof.query.filter_by(user_code=user_code).first()
+    if not proof:
+        return jsonify({"error": "Proof not found"}), 404
+
+    return jsonify({
+        "id": proof.id,
+        "user_code": proof.user_code,
+        "filename": proof.file_path,
+        "file_url": f"/serve-firm-proof/{proof.id}",
+        "uploaded_at": proof.uploaded_at.isoformat() if proof.uploaded_at else None
+    }), 200
+
+# ----------------
+# SERVE FILE (INLINE OR DOWNLOAD)
+# ----------------
+@app.route("/serve-firm-proof/<int:proof_id>", methods=["GET", "OPTIONS"])
+@cross_origin()
+def serve_firm_proof(proof_id):
+    if request.method == "OPTIONS":
+        return "", 200
+
+    proof = FirmProof.query.get(proof_id)
+    if not proof:
+        return jsonify({"error": "Proof not found"}), 404
+
+    as_attachment = request.args.get("download", "false").lower() == "true"
+    return send_file(
+        BytesIO(proof.file_data),
+        mimetype=guess_mimetype(proof.file_path),
+        as_attachment=as_attachment,
+        download_name=proof.file_path
+    )
+
+# ----------------
+# UPDATE / REPLACE
+# ----------------
+@app.route("/firm-proof/<int:proof_id>", methods=["PUT", "OPTIONS"])
+@cross_origin()
+def update_firm_proof(proof_id):
+    if request.method == "OPTIONS":
+        return "", 200
+
+    proof = FirmProof.query.get(proof_id)
+    if not proof:
+        return jsonify({"error": "Proof not found"}), 404
+
+    if "file" not in request.files:
+        return jsonify({"error": "No file uploaded"}), 400
+
+    try:
+        file = request.files["file"]
+        if file.filename.strip() == "":
+            return jsonify({"error": "Filename missing"}), 400
+
+        proof.file_path = secure_filename(file.filename)
+        proof.file_data = file.read()
+        proof.uploaded_at = datetime.utcnow()
+        db.session.commit()
+        return jsonify({"message": "Proof updated", "id": proof.id}), 200
+
+    except Exception as e:
+        db.session.rollback()
+        app.logger.exception("Error updating firm proof")
+        return jsonify({"error": "Internal server error", "details": str(e)}), 500
+
+# ----------------
+# DELETE
+# ----------------
+@app.route("/firm-proof/<int:proof_id>", methods=["DELETE", "OPTIONS"])
+@cross_origin()
+def delete_firm_proof(proof_id):
+    if request.method == "OPTIONS":
+        return "", 200
+
+    proof = FirmProof.query.get(proof_id)
+    if not proof:
+        return jsonify({"error": "Proof not found"}), 404
+
+    try:
+        db.session.delete(proof)
+        db.session.commit()
+        return jsonify({"message": "Proof deleted"}), 200
+    except Exception as e:
+        db.session.rollback()
+        app.logger.exception("Error deleting firm proof")
+        return jsonify({"error": "Internal server error", "details": str(e)}), 500
+        
 
 # ----------------
 # Run App
