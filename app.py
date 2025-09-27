@@ -70,11 +70,41 @@ CORS(
 # --- Model: matches your CREATE TABLE firm_proofs SQL ---
 class FirmProof(db.Model):
     __tablename__ = "firm_proofs"
+
     id = db.Column(db.Integer, primary_key=True)
     user_code = db.Column(db.String(50), nullable=False, unique=True, index=True)
-    file_path = db.Column(db.String(255), nullable=False)   # original filename
-    file_data = db.Column(db.LargeBinary, nullable=False)   # actual file
+
+    # original filename provided by client (human-friendly)
+    original_filename = db.Column(db.String(255), nullable=True)
+
+    # logical/file path or sanitized filename (used by your serving logic)
+    file_path = db.Column(db.String(255), nullable=False)
+
+    # raw bytes stored in DB
+    file_data = db.Column(db.LargeBinary, nullable=False)
+
+    # detected or provided mime type
+    mime_type = db.Column(db.String(100), nullable=True)
+
     uploaded_at = db.Column(db.DateTime(timezone=True), server_default=func.now())
+
+    def to_meta(self, backend_base=None):
+        """
+        Helper to return a serializable metadata dict.
+        If backend_base is provided, will construct full file_url from file id.
+        """
+        file_url = f"/serve-firm-proof/{self.id}"
+        if backend_base:
+            file_url = backend_base.rstrip("/") + file_url
+        return {
+            "id": self.id,
+            "user_code": self.user_code,
+            "original_filename": self.original_filename,
+            "filename": self.file_path,
+            "mime_type": self.mime_type,
+            "file_url": file_url,
+            "uploaded_at": self.uploaded_at.isoformat() if self.uploaded_at else None
+        }
 
     
 class FirmImage(db.Model):
@@ -819,6 +849,30 @@ def serve_image(user_code, filename):
 # ----------------
 # CREATE / UPLOAD
 # ----------------
+from flask import request, jsonify, send_file
+from werkzeug.utils import secure_filename
+from io import BytesIO
+from datetime import datetime
+import mimetypes
+
+from your_app import app, db  # adjust to your project
+from your_app.models import FirmProof  # adjust import
+from flask_cors import cross_origin
+from sqlalchemy.exc import SQLAlchemyError
+
+def guess_mimetype(filename, fallback=None):
+    """
+    Try to guess mime type from filename; fallback to provided mime or application/octet-stream.
+    """
+    if not filename:
+        return fallback or "application/octet-stream"
+    mtype, _ = mimetypes.guess_type(filename)
+    return mtype or fallback or "application/octet-stream"
+
+
+# ----------------
+# UPLOAD / CREATE
+# ----------------
 @app.route("/firm-proof", methods=["POST", "OPTIONS"])
 @cross_origin()
 def upload_firm_proof():
@@ -837,26 +891,52 @@ def upload_firm_proof():
         if file.filename.strip() == "":
             return jsonify({"error": "Filename missing"}), 400
 
-        filename = secure_filename(file.filename)
+        # store both original filename and a secure/safe file_path
+        original_fn = file.filename
+        safe_fn = secure_filename(original_fn)
 
-        # Check if proof already exists for this firm
+        # optional: prepend user_code to file_path to avoid filename collisions
+        # file_path = f"{user_code}/{safe_fn}"
+        file_path = safe_fn
+
+        mime = file.mimetype or guess_mimetype(original_fn)
+
+        # Prevent duplicate (if desired - keeps UNIQUE constraint semantic)
         existing = FirmProof.query.filter_by(user_code=user_code).first()
         if existing:
             return jsonify({"error": "Proof already uploaded for this firm"}), 400
 
         proof = FirmProof(
             user_code=user_code,
-            file_path=filename,
+            original_filename=original_fn,
+            file_path=file_path,
+            mime_type=mime,
             file_data=file.read()
         )
         db.session.add(proof)
         db.session.commit()
-        return jsonify({"message": "Proof uploaded", "id": proof.id}), 201
 
+        # return metadata (including new id, filename, mime_type)
+        return jsonify({
+            "message": "Proof uploaded",
+            "id": proof.id,
+            "user_code": proof.user_code,
+            "original_filename": proof.original_filename,
+            "filename": proof.file_path,
+            "mime_type": proof.mime_type,
+            "file_url": f"/serve-firm-proof/{proof.id}",
+            "uploaded_at": proof.uploaded_at.isoformat() if proof.uploaded_at else None
+        }), 201
+
+    except SQLAlchemyError as e:
+        db.session.rollback()
+        app.logger.exception("DB error uploading firm proof")
+        return jsonify({"error": "Internal server error", "details": str(e)}), 500
     except Exception as e:
         db.session.rollback()
         app.logger.exception("Error uploading firm proof")
         return jsonify({"error": "Internal server error", "details": str(e)}), 500
+
 
 # ----------------
 # READ / LIST BY USER
@@ -874,10 +954,13 @@ def get_firm_proof(user_code):
     return jsonify({
         "id": proof.id,
         "user_code": proof.user_code,
+        "original_filename": proof.original_filename,
         "filename": proof.file_path,
+        "mime_type": proof.mime_type,
         "file_url": f"/serve-firm-proof/{proof.id}",
         "uploaded_at": proof.uploaded_at.isoformat() if proof.uploaded_at else None
     }), 200
+
 
 # ----------------
 # SERVE FILE (INLINE OR DOWNLOAD)
@@ -893,12 +976,14 @@ def serve_firm_proof(proof_id):
         return jsonify({"error": "Proof not found"}), 404
 
     as_attachment = request.args.get("download", "false").lower() == "true"
+    mimetype = proof.mime_type or guess_mimetype(proof.original_filename)
     return send_file(
         BytesIO(proof.file_data),
-        mimetype=guess_mimetype(proof.file_path),
+        mimetype=mimetype,
         as_attachment=as_attachment,
-        download_name=proof.file_path
+        download_name=proof.original_filename or proof.file_path
     )
+
 
 # ----------------
 # UPDATE / REPLACE
@@ -921,16 +1006,32 @@ def update_firm_proof(proof_id):
         if file.filename.strip() == "":
             return jsonify({"error": "Filename missing"}), 400
 
-        proof.file_path = secure_filename(file.filename)
+        original_fn = file.filename
+        safe_fn = secure_filename(original_fn)
+        proof.original_filename = original_fn
+        proof.file_path = safe_fn
+        proof.mime_type = file.mimetype or guess_mimetype(original_fn)
         proof.file_data = file.read()
         proof.uploaded_at = datetime.utcnow()
         db.session.commit()
-        return jsonify({"message": "Proof updated", "id": proof.id}), 200
+        return jsonify({
+            "message": "Proof updated",
+            "id": proof.id,
+            "original_filename": proof.original_filename,
+            "filename": proof.file_path,
+            "mime_type": proof.mime_type,
+            "uploaded_at": proof.uploaded_at.isoformat() if proof.uploaded_at else None
+        }), 200
 
+    except SQLAlchemyError as e:
+        db.session.rollback()
+        app.logger.exception("DB error updating firm proof")
+        return jsonify({"error": "Internal server error", "details": str(e)}), 500
     except Exception as e:
         db.session.rollback()
         app.logger.exception("Error updating firm proof")
         return jsonify({"error": "Internal server error", "details": str(e)}), 500
+
 
 # ----------------
 # DELETE
@@ -949,11 +1050,14 @@ def delete_firm_proof(proof_id):
         db.session.delete(proof)
         db.session.commit()
         return jsonify({"message": "Proof deleted"}), 200
+    except SQLAlchemyError as e:
+        db.session.rollback()
+        app.logger.exception("DB error deleting firm proof")
+        return jsonify({"error": "Internal server error", "details": str(e)}), 500
     except Exception as e:
         db.session.rollback()
         app.logger.exception("Error deleting firm proof")
         return jsonify({"error": "Internal server error", "details": str(e)}), 500
-        
 
 # ----------------
 # Run App
