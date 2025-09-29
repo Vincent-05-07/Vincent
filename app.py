@@ -74,6 +74,30 @@ CORS(
 # Models
 # ----------------
 # --- Model: matches your CREATE TABLE firm_proofs SQL ---
+
+class Job(db.Model):
+    __tablename__ = "jobs"
+
+    id = db.Column(db.Integer, primary_key=True)
+    title = db.Column(db.String(255), nullable=False)
+    description = db.Column(db.Text, nullable=True)
+    file_name = db.Column(db.String(255), nullable=True)   # store original filename
+    file_data = db.Column(db.LargeBinary, nullable=True)   # store actual file bytes
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "title": self.title,
+            "description": self.description,
+            "file_name": self.file_name,
+            "created_at": self.created_at,
+            "updated_at": self.updated_at
+            # ⚠️ don't include file_data here (too large for JSON)
+        }
+
+
 class FirmProof(db.Model):
     __tablename__ = "firm_proofs"
 
@@ -995,6 +1019,105 @@ def delete_firm_proof(proof_id):
         db.session.rollback()
         app.logger.exception("Error deleting firm proof")
         return jsonify({"error": "Internal server error", "details": str(e)}), 500
+
+ALLOWED_EXTENSIONS = {"pdf", "doc", "docx", "png", "jpg", "jpeg"}
+
+def allowed_file(filename):
+    return "." in filename and filename.rsplit(".", 1)[1].lower() in ALLOWED_EXTENSIONS
+
+@current_app.route("/api/jobs", methods=["POST", "OPTIONS"])
+def create_job():
+    if request.method == "OPTIONS":
+        return jsonify({}), 200
+
+    title = request.form.get("title")
+    description = request.form.get("description")
+    file = request.files.get("file")
+
+    if not title:
+        return jsonify({"error": "Title is required"}), 400
+
+    job = Job(title=title, description=description)
+
+    if file:
+        job.file_name = file.filename
+        job.file_data = file.read()  # store actual binary data
+
+    db.session.add(job)
+    db.session.commit()
+    return jsonify(job.to_dict()), 201
+
+
+# READ all jobs
+@current_app.route("/api/jobs", methods=["GET", "OPTIONS"])
+def get_jobs():
+    if request.method == "OPTIONS":
+        return jsonify({}), 200
+
+    jobs = Job.query.all()
+    return jsonify([job.to_dict() for job in jobs]), 200
+
+
+# READ one job
+@current_app.route("/api/jobs/<int:job_id>", methods=["GET", "OPTIONS"])
+def get_job(job_id):
+    if request.method == "OPTIONS":
+        return jsonify({}), 200
+
+    job = Job.query.get_or_404(job_id)
+    return jsonify(job.to_dict()), 200
+
+
+# DOWNLOAD stored file
+@current_app.route("/api/jobs/<int:job_id>/download", methods=["GET", "OPTIONS"])
+def download_job_file(job_id):
+    if request.method == "OPTIONS":
+        return jsonify({}), 200
+
+    job = Job.query.get_or_404(job_id)
+    if not job.file_data:
+        return jsonify({"error": "No file uploaded"}), 404
+
+    mime_type, _ = mimetypes.guess_type(job.file_name or "file.bin")
+    return send_file(
+        BytesIO(job.file_data),
+        mimetype=mime_type or "application/octet-stream",
+        as_attachment=True,
+        download_name=job.file_name or "downloaded_file"
+    )
+
+
+# UPDATE job
+@current_app.route("/api/jobs/<int:job_id>", methods=["PUT", "OPTIONS"])
+def update_job(job_id):
+    if request.method == "OPTIONS":
+        return jsonify({}), 200
+
+    job = Job.query.get_or_404(job_id)
+    data = request.form
+    file = request.files.get("file")
+
+    job.title = data.get("title", job.title)
+    job.description = data.get("description", job.description)
+
+    if file:
+        job.file_name = file.filename
+        job.file_data = file.read()
+
+    db.session.commit()
+    return jsonify(job.to_dict()), 200
+
+
+# DELETE job
+@current_app.route("/api/jobs/<int:job_id>", methods=["DELETE", "OPTIONS"])
+def delete_job(job_id):
+    if request.method == "OPTIONS":
+        return jsonify({}), 200
+
+    job = Job.query.get_or_404(job_id)
+    db.session.delete(job)
+    db.session.commit()
+    return jsonify({"message": "Job deleted"}), 200
 
 # ----------------
 # Run App
