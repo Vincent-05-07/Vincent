@@ -1020,15 +1020,14 @@ def delete_firm_proof(proof_id):
         app.logger.exception("Error deleting firm proof")
         return jsonify({"error": "Internal server error", "details": str(e)}), 500
 
-ALLOWED_EXTENSIONS = {"pdf", "doc", "docx", "png", "jpg", "jpeg"}
-
-def allowed_file(filename):
-    return "." in filename and filename.rsplit(".", 1)[1].lower() in ALLOWED_EXTENSIONS
-
-@current_app.route("/api/jobs", methods=["POST", "OPTIONS"])
+# ----------------
+# CREATE JOB
+# ----------------
+@app.route("/api/jobs", methods=["POST", "OPTIONS"])
+@cross_origin()
 def create_job():
     if request.method == "OPTIONS":
-        return jsonify({}), 200
+        return "", 200
 
     title = request.form.get("title")
     description = request.form.get("description")
@@ -1040,45 +1039,58 @@ def create_job():
     job = Job(title=title, description=description)
 
     if file:
-        job.file_name = file.filename
-        job.file_data = file.read()  # store actual binary data
+        original_fn = file.filename
+        safe_fn = secure_filename(original_fn)
+        job.file_name = original_fn
+        job.file_path = safe_fn
+        job.mime_type = file.mimetype or mimetypes.guess_type(original_fn)[0]
+        job.file_data = file.read()
+        job.uploaded_at = datetime.utcnow()
 
-    db.session.add(job)
-    db.session.commit()
-    return jsonify(job.to_dict()), 201
+    try:
+        db.session.add(job)
+        db.session.commit()
+        return jsonify(job.to_dict()), 201
+    except SQLAlchemyError as e:
+        db.session.rollback()
+        app.logger.exception("DB error creating job")
+        return jsonify({"error": "Internal server error", "details": str(e)}), 500
 
-
-# READ all jobs
-@current_app.route("/api/jobs", methods=["GET", "OPTIONS"])
+# ----------------
+# READ ALL JOBS
+# ----------------
+@app.route("/api/jobs", methods=["GET", "OPTIONS"])
+@cross_origin()
 def get_jobs():
     if request.method == "OPTIONS":
-        return jsonify({}), 200
-
+        return "", 200
     jobs = Job.query.all()
     return jsonify([job.to_dict() for job in jobs]), 200
 
-
-# READ one job
-@current_app.route("/api/jobs/<int:job_id>", methods=["GET", "OPTIONS"])
+# ----------------
+# READ ONE JOB
+# ----------------
+@app.route("/api/jobs/<int:job_id>", methods=["GET", "OPTIONS"])
+@cross_origin()
 def get_job(job_id):
     if request.method == "OPTIONS":
-        return jsonify({}), 200
-
+        return "", 200
     job = Job.query.get_or_404(job_id)
     return jsonify(job.to_dict()), 200
 
-
-# DOWNLOAD stored file
-@current_app.route("/api/jobs/<int:job_id>/download", methods=["GET", "OPTIONS"])
+# ----------------
+# DOWNLOAD JOB FILE
+# ----------------
+@app.route("/api/jobs/<int:job_id>/download", methods=["GET", "OPTIONS"])
+@cross_origin()
 def download_job_file(job_id):
     if request.method == "OPTIONS":
-        return jsonify({}), 200
-
+        return "", 200
     job = Job.query.get_or_404(job_id)
     if not job.file_data:
         return jsonify({"error": "No file uploaded"}), 404
 
-    mime_type, _ = mimetypes.guess_type(job.file_name or "file.bin")
+    mime_type = job.mime_type or mimetypes.guess_type(job.file_name or "file.bin")[0]
     return send_file(
         BytesIO(job.file_data),
         mimetype=mime_type or "application/octet-stream",
@@ -1086,12 +1098,14 @@ def download_job_file(job_id):
         download_name=job.file_name or "downloaded_file"
     )
 
-
-# UPDATE job
-@current_app.route("/api/jobs/<int:job_id>", methods=["PUT", "OPTIONS"])
+# ----------------
+# UPDATE JOB
+# ----------------
+@app.route("/api/jobs/<int:job_id>", methods=["PUT", "OPTIONS"])
+@cross_origin()
 def update_job(job_id):
     if request.method == "OPTIONS":
-        return jsonify({}), 200
+        return "", 200
 
     job = Job.query.get_or_404(job_id)
     data = request.form
@@ -1101,23 +1115,40 @@ def update_job(job_id):
     job.description = data.get("description", job.description)
 
     if file:
-        job.file_name = file.filename
+        original_fn = file.filename
+        safe_fn = secure_filename(original_fn)
+        job.file_name = original_fn
+        job.file_path = safe_fn
+        job.mime_type = file.mimetype or mimetypes.guess_type(original_fn)[0]
         job.file_data = file.read()
+        job.uploaded_at = datetime.utcnow()
 
-    db.session.commit()
-    return jsonify(job.to_dict()), 200
+    try:
+        db.session.commit()
+        return jsonify(job.to_dict()), 200
+    except SQLAlchemyError as e:
+        db.session.rollback()
+        app.logger.exception("DB error updating job")
+        return jsonify({"error": "Internal server error", "details": str(e)}), 500
 
-
-# DELETE job
-@current_app.route("/api/jobs/<int:job_id>", methods=["DELETE", "OPTIONS"])
+# ----------------
+# DELETE JOB
+# ----------------
+@app.route("/api/jobs/<int:job_id>", methods=["DELETE", "OPTIONS"])
+@cross_origin()
 def delete_job(job_id):
     if request.method == "OPTIONS":
-        return jsonify({}), 200
+        return "", 200
 
     job = Job.query.get_or_404(job_id)
-    db.session.delete(job)
-    db.session.commit()
-    return jsonify({"message": "Job deleted"}), 200
+    try:
+        db.session.delete(job)
+        db.session.commit()
+        return jsonify({"message": "Job deleted"}), 200
+    except SQLAlchemyError as e:
+        db.session.rollback()
+        app.logger.exception("DB error deleting job")
+        return jsonify({"error": "Internal server error", "details": str(e)}), 500
 
 # ----------------
 # Run App
