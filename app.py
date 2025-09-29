@@ -3,6 +3,8 @@ from datetime import datetime
 from io import BytesIO
 from mimetypes import guess_type
 
+from postmarker.core import PostmarkClient
+
 
 import mimetypes
 
@@ -1149,6 +1151,39 @@ def delete_job(job_id):
         db.session.rollback()
         app.logger.exception("DB error deleting job")
         return jsonify({"error": "Internal server error", "details": str(e)}), 500
+
+postmark = PostmarkClient(server_token="ba8645aa-ef55-46d1-b642-5d3b1055eab4")
+
+@app.route('/send-email', methods=['POST'])
+def send_email():
+    try:
+        data = request.json
+
+        # Extract required fields from request
+        company_email = data.get("companyEmail")
+        company_name = data.get("companyName")
+        user_name = data.get("userName")
+
+        if not company_email or not company_name or not user_name:
+            return jsonify({"status": "error", "message": "Missing required fields"}), 400
+
+        # Construct email
+        response = postmark.emails.send(
+            From='WELAP System <sender@example.com>',  # Replace with your verified sender
+            To=company_email,
+            Subject="Action Required: Complete Your Signup",
+            HtmlBody=f"""
+                <p>Dear <strong>{company_name}</strong>,</p>
+                <p>We are writing to inform you that <strong>{user_name}</strong> has manually added your firm to our platform. We kindly invite you to complete the signup process so you can begin using our system to its full potential.</p>
+                <p>Kind regards,<br><strong>Vincent Civic Platform</strong></p>
+            """,
+            TextBody=f"Dear {company_name},\n\n{user_name} has manually added your firm to our platform. Please complete the signup process.\n\nKind regards,\nVincent Civic Platform"
+        )
+
+        return jsonify({"status": "success", "response": response}), 200
+
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 # ----------------
 # Run App
