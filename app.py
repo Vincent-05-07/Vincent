@@ -3,7 +3,8 @@ from datetime import datetime
 from io import BytesIO
 from mimetypes import guess_type
 
-from postmarker.core import PostmarkClient
+import sib_api_v3_sdk
+from sib_api_v3_sdk.rest import ApiException
 
 
 import mimetypes
@@ -1152,64 +1153,6 @@ def delete_job(job_id):
         app.logger.exception("DB error deleting job")
         return jsonify({"error": "Internal server error", "details": str(e)}), 500
 
-postmark = PostmarkClient(server_token="ba8645aa-ef55-46d1-b642-5d3b1055eab4")
-
-@app.route('/send-email', methods=['POST'])
-def send_email():
-    # Defensive: ensure we got JSON
-    data = None
-    try:
-        data = request.get_json(force=False, silent=True)
-    except Exception:
-        data = None
-
-    if not data:
-        app.logger.warning("send-email: no JSON payload; request.data=%s", request.data[:500])
-        return jsonify({"status": "error", "message": "No JSON payload provided"}), 400
-
-    company_email = data.get("companyEmail")
-    company_name = data.get("companyName")
-    user_name = data.get("userName")
-
-    # Validate required fields
-    missing = [k for k, v in (("companyEmail", company_email), ("companyName", company_name), ("userName", user_name)) if not v]
-    if missing:
-        return jsonify({"status": "error", "message": f"Missing required fields: {', '.join(missing)}"}), 400
-
-    # Ensure From is a verified sender in Postmark (replace sender@example.com)
-    from_address = data.get("from", "WELAP System <sender@example.com>")
-
-    # Compose email bodies
-    html_body = f"""
-      <p>Dear <strong>{company_name}</strong>,</p>
-      <p>We are writing to inform you that <strong>{user_name}</strong> has manually added your firm to our platform. We kindly invite you to complete the signup process so you can begin using our system to its full potential.</p>
-      <p>Kind regards,<br><strong>Vincent Civic Platform</strong></p>
-    """
-    text_body = f"Dear {company_name},\n\n{user_name} has manually added your firm to our platform. Please complete the signup process.\n\nKind regards,\nVincent Civic Platform"
-
-    try:
-        # Make the Postmark call and capture response
-        pm_resp = postmark.emails.send(
-            From=from_address,
-            To=company_email,
-            Subject="Action Required: Complete Your Signup",
-            HtmlBody=html_body,
-            TextBody=text_body
-        )
-        # pm_resp is usually a dict-like object; return it for debugging
-        return jsonify({"status": "success", "postmark_response": pm_resp}), 200
-
-    except Exception as e:
-        # Log full traceback in server logs
-        app.logger.exception("send-email: exception while sending via Postmark")
-        # Try to return helpful info, but avoid leaking sensitive internals in production
-        return jsonify({
-            "status": "error",
-            "message": "Failed to send email",
-            "details": str(e)
-        }), 500
-
-
 
 # ======================================================
 # CRUD: Profile Pictures stored in PostgreSQL BYTEA
@@ -1281,6 +1224,64 @@ def delete_profile_picture(user_id):
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+
+configuration = sib_api_v3_sdk.Configuration()
+configuration.api_key['api-key'] = "21Zfm4c68p3FhC0N"  # ⚠️ your key here
+api_instance = sib_api_v3_sdk.TransactionalEmailsApi(
+    sib_api_v3_sdk.ApiClient(configuration)
+)
+
+@app.route('/send-email', methods=['POST'])
+def send_email():
+    data = request.get_json(silent=True)
+
+    if not data:
+        return jsonify({"status": "error", "message": "No JSON payload provided"}), 400
+
+    company_email = data.get("companyEmail")
+    company_name = data.get("companyName")
+    user_name = data.get("userName")
+
+    # Validate required fields
+    missing = [k for k, v in (("companyEmail", company_email),
+                              ("companyName", company_name),
+                              ("userName", user_name)) if not v]
+    if missing:
+        return jsonify({
+            "status": "error",
+            "message": f"Missing required fields: {', '.join(missing)}"
+        }), 400
+
+    # ✅ Use a VERIFIED sender email from Brevo dashboard
+    from_address = {"name": "WELAP System", "email": "your_verified@domain.com"}
+
+    subject = "Action Required: Complete Your Signup"
+    html_body = f"""
+      <p>Dear <strong>{company_name}</strong>,</p>
+      <p>{user_name} has manually added your firm to our platform. 
+      We kindly invite you to complete the signup process so you can 
+      begin using our system to its full potential.</p>
+      <p>Kind regards,<br><strong>Vincent Civic Platform</strong></p>
+    """
+    text_body = f"Dear {company_name},\n\n{user_name} has manually added your firm to our platform. Please complete the signup process.\n\nKind regards,\nVincent Civic Platform"
+
+    email = sib_api_v3_sdk.SendSmtpEmail(
+        to=[{"email": company_email}],
+        sender=from_address,
+        subject=subject,
+        html_content=html_body,
+        text_content=text_body
+    )
+
+    try:
+        response = api_instance.send_transac_email(email)
+        return jsonify({"status": "success", "brevo_response": str(response)}), 200
+    except ApiException as e:
+        return jsonify({
+            "status": "error",
+            "message": "Failed to send email",
+            "details": str(e)
+        }), 500
 
         
 # ----------------
