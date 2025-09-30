@@ -1,7 +1,8 @@
-postmarker
 Flask
 Flask-SQLAlchemy
 psycopg2-binary
 python-dotenv
 gunicorn
 flask_cors
+sib-api-v3-sdk
+firebase-admin
