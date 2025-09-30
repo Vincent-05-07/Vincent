@@ -1208,6 +1208,80 @@ def send_email():
             "message": "Failed to send email",
             "details": str(e)
         }), 500
+
+
+
+# ======================================================
+# CRUD: Profile Pictures stored in PostgreSQL BYTEA
+# ======================================================
+
+@app.route("/profile-picture/<string:user_id>", methods=["GET", "OPTIONS"])
+@cross_origin()
+def get_profile_picture(user_id):
+    if request.method == "OPTIONS":
+        return "", 200
+    try:
+        cursor = conn.cursor()
+        cursor.execute("SELECT profile_picture FROM users WHERE id = %s;", (user_id,))
+        result = cursor.fetchone()
+        cursor.close()
+        if result and result[0]:
+            return send_file(io.BytesIO(result[0]), mimetype="image/jpeg")
+        return jsonify({"message": "No profile picture found"}), 404
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/profile-picture/<string:user_id>", methods=["POST", "OPTIONS"])
+@cross_origin()
+def upload_profile_picture(user_id):
+    if request.method == "OPTIONS":
+        return "", 200
+    if "image" not in request.files:
+        return jsonify({"error": "No image uploaded"}), 400
+
+    image = request.files["image"].read()
+    if not image:
+        return jsonify({"error": "Empty file"}), 400
+
+    try:
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE users SET profile_picture = %s WHERE id = %s;",
+            (psycopg2.Binary(image), user_id)
+        )
+        conn.commit()
+        cursor.close()
+        return jsonify({"message": "Profile picture uploaded"}), 201
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/profile-picture/<string:user_id>", methods=["PUT", "OPTIONS"])
+@cross_origin()
+def update_profile_picture(user_id):
+    if request.method == "OPTIONS":
+        return "", 200
+    return upload_profile_picture(user_id)  # reuse POST logic
+
+
+@app.route("/profile-picture/<string:user_id>", methods=["DELETE", "OPTIONS"])
+@cross_origin()
+def delete_profile_picture(user_id):
+    if request.method == "OPTIONS":
+        return "", 200
+    try:
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE users SET profile_picture = NULL WHERE id = %s;", (user_id,)
+        )
+        conn.commit()
+        cursor.close()
+        return jsonify({"message": "Profile picture deleted"}), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
         
 # ----------------
 # Run App
