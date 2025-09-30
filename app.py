@@ -1156,35 +1156,59 @@ postmark = PostmarkClient(server_token="ba8645aa-ef55-46d1-b642-5d3b1055eab4")
 
 @app.route('/send-email', methods=['POST'])
 def send_email():
+    # Defensive: ensure we got JSON
+    data = None
     try:
-        data = request.json
+        data = request.get_json(force=False, silent=True)
+    except Exception:
+        data = None
 
-        # Extract required fields from request
-        company_email = data.get("companyEmail")
-        company_name = data.get("companyName")
-        user_name = data.get("userName")
+    if not data:
+        app.logger.warning("send-email: no JSON payload; request.data=%s", request.data[:500])
+        return jsonify({"status": "error", "message": "No JSON payload provided"}), 400
 
-        if not company_email or not company_name or not user_name:
-            return jsonify({"status": "error", "message": "Missing required fields"}), 400
+    company_email = data.get("companyEmail")
+    company_name = data.get("companyName")
+    user_name = data.get("userName")
 
-        # Construct email
-        response = postmark.emails.send(
-            From='WELAP System <sender@example.com>',  # Replace with your verified sender
+    # Validate required fields
+    missing = [k for k, v in (("companyEmail", company_email), ("companyName", company_name), ("userName", user_name)) if not v]
+    if missing:
+        return jsonify({"status": "error", "message": f"Missing required fields: {', '.join(missing)}"}), 400
+
+    # Ensure From is a verified sender in Postmark (replace sender@example.com)
+    from_address = data.get("from", "WELAP System <sender@example.com>")
+
+    # Compose email bodies
+    html_body = f"""
+      <p>Dear <strong>{company_name}</strong>,</p>
+      <p>We are writing to inform you that <strong>{user_name}</strong> has manually added your firm to our platform. We kindly invite you to complete the signup process so you can begin using our system to its full potential.</p>
+      <p>Kind regards,<br><strong>Vincent Civic Platform</strong></p>
+    """
+    text_body = f"Dear {company_name},\n\n{user_name} has manually added your firm to our platform. Please complete the signup process.\n\nKind regards,\nVincent Civic Platform"
+
+    try:
+        # Make the Postmark call and capture response
+        pm_resp = postmark.emails.send(
+            From=from_address,
             To=company_email,
             Subject="Action Required: Complete Your Signup",
-            HtmlBody=f"""
-                <p>Dear <strong>{company_name}</strong>,</p>
-                <p>We are writing to inform you that <strong>{user_name}</strong> has manually added your firm to our platform. We kindly invite you to complete the signup process so you can begin using our system to its full potential.</p>
-                <p>Kind regards,<br><strong>Vincent Civic Platform</strong></p>
-            """,
-            TextBody=f"Dear {company_name},\n\n{user_name} has manually added your firm to our platform. Please complete the signup process.\n\nKind regards,\nVincent Civic Platform"
+            HtmlBody=html_body,
+            TextBody=text_body
         )
-
-        return jsonify({"status": "success", "response": response}), 200
+        # pm_resp is usually a dict-like object; return it for debugging
+        return jsonify({"status": "success", "postmark_response": pm_resp}), 200
 
     except Exception as e:
-        return jsonify({"status": "error", "message": str(e)}), 500
-
+        # Log full traceback in server logs
+        app.logger.exception("send-email: exception while sending via Postmark")
+        # Try to return helpful info, but avoid leaking sensitive internals in production
+        return jsonify({
+            "status": "error",
+            "message": "Failed to send email",
+            "details": str(e)
+        }), 500
+        
 # ----------------
 # Run App
 # ----------------
