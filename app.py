@@ -1228,8 +1228,6 @@ def delete_profile_picture(user_id):
         return jsonify({"error": str(e)}), 500
 
 
-BREVO_KEY = os.getenv("BREVO_API_KEY", "21Zfm4c68p3FhC0N")  # replace fallback or remove once env var used
-
 configuration = sib_api_v3_sdk.Configuration()
 configuration.api_key['api-key'] = BREVO_KEY
 api_instance = sib_api_v3_sdk.TransactionalEmailsApi(sib_api_v3_sdk.ApiClient(configuration))
