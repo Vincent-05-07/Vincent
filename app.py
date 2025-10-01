@@ -1228,24 +1228,44 @@ def delete_profile_picture(user_id):
         return jsonify({"error": str(e)}), 500
 
 
-configuration = sib_api_v3_sdk.Configuration()
-configuration.api_key['api-key'] = BREVO_KEY
-api_instance = sib_api_v3_sdk.TransactionalEmailsApi(sib_api_v3_sdk.ApiClient(configuration))
+BREVO_KEY = os.getenv("BREVO_API_KEY")
+if BREVO_KEY:
+    BREVO_KEY = BREVO_KEY.strip()
+    configuration = sib_api_v3_sdk.Configuration()
+    configuration.api_key['api-key'] = BREVO_KEY
+    api_instance = sib_api_v3_sdk.TransactionalEmailsApi(sib_api_v3_sdk.ApiClient(configuration))
+    app.logger.info("Brevo client initialized")
+else:
+    api_instance = None
+    app.logger.error("BREVO_API_KEY env var not found — Brevo client not initialized")
 
+# Optional: a verified sender fallback configured in environment
+VERIFIED_SENDER_EMAIL = os.getenv("VERIFIED_SENDER_EMAIL")  # e.g. "noreply@yourdomain.com"
+if VERIFIED_SENDER_EMAIL:
+    VERIFIED_SENDER_EMAIL = VERIFIED_SENDER_EMAIL.strip()
+
+# ------------------------
+# send-email route
+# ------------------------
 @app.route('/send-email', methods=['POST'])
 def send_email():
-    # log request for debugging
+    # If Brevo client is not configured, return a clear error.
+    if api_instance is None:
+        app.logger.error("send-email called but Brevo client is not configured (missing BREVO_API_KEY)")
+        return jsonify({"status": "error", "message": "Email service not configured"}), 500
+
+    # Log request headers and raw body (truncated)
     try:
         app.logger.info("send-email invoked; headers=%s", dict(request.headers))
         raw = request.get_data(as_text=True)
-        app.logger.debug("send-email raw body: %s", raw[:2000])
+        app.logger.debug("send-email raw body (truncated): %s", (raw or "")[:2000])
     except Exception:
         app.logger.exception("Failed reading request raw body")
+        raw = None
 
-    # parse JSON
+    # Parse JSON from body
     data = request.get_json(silent=True)
     if not data:
-        # try fallback to parse text
         try:
             data = json.loads(raw) if raw else None
         except Exception:
@@ -1255,7 +1275,7 @@ def send_email():
         app.logger.warning("send-email: no JSON payload; request.data=%s", (raw or "")[:1000])
         return jsonify({"status": "error", "message": "No JSON payload provided"}), 400
 
-    # required fields
+    # Required fields
     company_email = data.get("companyEmail")
     company_name = data.get("companyName")
     user_name = data.get("userName")
@@ -1265,11 +1285,18 @@ def send_email():
         app.logger.warning("send-email: missing fields %s", missing)
         return jsonify({"status": "error", "message": f"Missing required fields: {', '.join(missing)}"}), 400
 
-    # IMPORTANT: Brevo requires this sender to be VERIFIED in the Brevo dashboard
-    sender_email = data.get("from_email", "your_verified@domain.com")  # change to your verified sender
+    # Determine sender email/name: prefer payload value, then VERIFIED_SENDER_EMAIL env var
+    sender_email = (data.get("from_email") or VERIFIED_SENDER_EMAIL or "").strip()
     sender_name = data.get("from_name", "WELAP System")
 
-    # Compose email content
+    if not sender_email:
+        app.logger.error("send-email: no sender email provided and VERIFIED_SENDER_EMAIL not configured")
+        return jsonify({
+            "status": "error",
+            "message": "No sender configured. Provide from_email in payload or set VERIFIED_SENDER_EMAIL env var."
+        }), 500
+
+    # Compose email content (payload overrides allowed)
     subject = data.get("subject", "Action Required: Complete Your Signup")
     html_body = data.get("htmlBody") or f"""
       <p>Dear <strong>{company_name}</strong>,</p>
@@ -1278,6 +1305,7 @@ def send_email():
     """
     text_body = data.get("textBody") or f"Dear {company_name},\n\n{user_name} has manually added your firm to our platform. Please complete the signup process.\n\nKind regards,\nVincent Civic Platform"
 
+    # Build Brevo email model
     email = sib_api_v3_sdk.SendSmtpEmail(
         to=[{"email": company_email}],
         sender={"name": sender_name, "email": sender_email},
@@ -1286,39 +1314,48 @@ def send_email():
         text_content=text_body
     )
 
+    # Attempt to send via Brevo
     try:
         resp = api_instance.send_transac_email(email)
-        # Log Brevo response object for debugging
-        app.logger.info("Brevo send_transac_email success: %s", getattr(resp, "__dict__", str(resp)) )
-        # return resp as JSON-friendly structure if possible
+        # Convert SDK response to something JSON serializable if possible
         try:
-            # some SDK responses are models; try to convert to dict via to_dict if available
             body = resp.to_dict() if hasattr(resp, "to_dict") else str(resp)
         except Exception:
             body = str(resp)
+        app.logger.info("Brevo send_transac_email success: %s", body)
         return jsonify({"status": "success", "brevo_response": body}), 200
 
     except ApiException as e:
-        # ApiException from sib_api_v3_sdk often contains a body with details
+        # Log full exception for server logs
         app.logger.exception("Brevo ApiException while sending email")
+        # Try to extract useful structured info from ApiException
         err_info = {"status": "error", "message": "Brevo ApiException", "type": e.__class__.__name__}
-        # add structured fields if present (be careful in production)
         try:
             err_info["api_status"] = getattr(e, "status", None)
-            err_info["api_body"] = getattr(e, "body", None)
+            raw_body = getattr(e, "body", None)
+            if isinstance(raw_body, (bytes, bytearray)):
+                raw_body = raw_body.decode(errors="ignore")
+            # try JSON decode, otherwise include raw string
+            try:
+                err_info["api_body"] = json.loads(raw_body) if raw_body else raw_body
+            except Exception:
+                err_info["api_body"] = raw_body
         except Exception:
-            pass
-        return jsonify(err_info), 500
+            app.logger.exception("Failed to extract ApiException body")
+        # use the HTTP status from ApiException if available
+        status_code = getattr(e, "status", 500) or 500
+        return jsonify(err_info), status_code
 
     except Exception as e:
-        # catch-all
+        # catch-all: log and return a useful diagnostic payload (trimmed traceback)
         app.logger.exception("Unhandled exception in send-email")
+        tb_lines = traceback.format_exc().splitlines()
         return jsonify({
             "status": "error",
             "message": "Unhandled exception in send-email",
             "error": str(e),
             "type": e.__class__.__name__,
-            "traceback": traceback.format_exc().splitlines()[-10:]  # last 10 lines of trace
+            "traceback_tail": tb_lines[-12:]  # last lines only
         }), 500
         
 # ----------------
