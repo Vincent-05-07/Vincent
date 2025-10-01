@@ -5,6 +5,7 @@ from mimetypes import guess_type
 
 import sib_api_v3_sdk
 from sib_api_v3_sdk.rest import ApiException
+import logging
 
 import os
 import json
@@ -1228,6 +1229,9 @@ def delete_profile_picture(user_id):
         return jsonify({"error": str(e)}), 500
 
 
+# ------------------------
+# Brevo client initialization (no inline keys here)
+# ------------------------
 BREVO_KEY = os.getenv("BREVO_API_KEY")
 if BREVO_KEY:
     BREVO_KEY = BREVO_KEY.strip()
@@ -1240,9 +1244,16 @@ else:
     app.logger.error("BREVO_API_KEY env var not found — Brevo client not initialized")
 
 # Optional: a verified sender fallback configured in environment
-VERIFIED_SENDER_EMAIL = os.getenv("VERIFIED_SENDER_EMAIL")  # e.g. "noreply@yourdomain.com"
+VERIFIED_SENDER_EMAIL = os.getenv("VERIFIED_SENDER_EMAIL")
 if VERIFIED_SENDER_EMAIL:
     VERIFIED_SENDER_EMAIL = VERIFIED_SENDER_EMAIL.strip()
+    # basic sanity check and masked log
+    if "@" in VERIFIED_SENDER_EMAIL:
+        domain = VERIFIED_SENDER_EMAIL.split("@", 1)[1]
+        app.logger.info("VERIFIED_SENDER_EMAIL configured (masked): ****@%s", domain)
+    else:
+        app.logger.warning("VERIFIED_SENDER_EMAIL appears invalid: %s", VERIFIED_SENDER_EMAIL)
+        VERIFIED_SENDER_EMAIL = None
 
 # ------------------------
 # send-email route
@@ -1295,6 +1306,11 @@ def send_email():
             "status": "error",
             "message": "No sender configured. Provide from_email in payload or set VERIFIED_SENDER_EMAIL env var."
         }), 500
+
+    # Basic sender email format validation
+    if "@" not in sender_email or "." not in sender_email.split("@")[-1]:
+        app.logger.error("send-email: sender email appears invalid: %s", sender_email)
+        return jsonify({"status": "error", "message": "Configured sender email is invalid"}), 500
 
     # Compose email content (payload overrides allowed)
     subject = data.get("subject", "Action Required: Complete Your Signup")
@@ -1357,6 +1373,7 @@ def send_email():
             "type": e.__class__.__name__,
             "traceback_tail": tb_lines[-12:]  # last lines only
         }), 500
+
         
 # ----------------
 # Run App
