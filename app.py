@@ -1232,6 +1232,8 @@ def delete_profile_picture(user_id):
 # ------------------------
 # Brevo client initialization (no inline keys here)
 # ------------------------
+# Brevo initialization + enhanced send-email route (accepts added fields and composes a richer message)
+
 BREVO_KEY = os.getenv("BREVO_API_KEY")
 if BREVO_KEY:
     BREVO_KEY = BREVO_KEY.strip()
@@ -1286,15 +1288,32 @@ def send_email():
         app.logger.warning("send-email: no JSON payload; request.data=%s", (raw or "")[:1000])
         return jsonify({"status": "error", "message": "No JSON payload provided"}), 400
 
-    # Required fields
+    # Required fields (recipient/company + company name + a display name for the adder)
     company_email = data.get("companyEmail")
     company_name = data.get("companyName")
-    user_name = data.get("userName")
+    user_name = data.get("userName")  # human-friendly adder display name
 
     missing = [k for k, v in (("companyEmail", company_email), ("companyName", company_name), ("userName", user_name)) if not v]
     if missing:
         app.logger.warning("send-email: missing fields %s", missing)
         return jsonify({"status": "error", "message": f"Missing required fields: {', '.join(missing)}"}), 400
+
+    # Optional richer fields (new)
+    added_by_first = data.get("addedByFirstName") or data.get("adderFirstName") or data.get("adder_firstname")
+    added_by_last = data.get("addedByLastName") or data.get("adderLastName") or data.get("adder_lastname")
+    adder_user_code = data.get("userCode") or data.get("adderUserCode") or data.get("addedByUserCode")
+    manual_firm_code = data.get("manualFirmCode") or data.get("manualFirmId")
+    proof_file_url = data.get("proofFileUrl") or data.get("proof_file_url")
+    student_email = data.get("studentEmail") or data.get("addedByEmail") or data.get("adderEmail") or data.get("userEmail")
+
+    # Representative name if provided in payload (try various keys)
+    rep_first = data.get("repFirstName") or data.get("rep_firstname") or None
+    rep_last = data.get("repLastName") or data.get("rep_lastname") or None
+    rep_display = None
+    if rep_first or rep_last:
+        rep_display = f"{(rep_first or '').strip()} {(rep_last or '').strip()}".strip()
+    # fallback: use company name
+    rep_display = rep_display or company_name
 
     # Determine sender email/name: prefer payload value, then VERIFIED_SENDER_EMAIL env var
     sender_email = (data.get("from_email") or VERIFIED_SENDER_EMAIL or "").strip()
@@ -1313,13 +1332,55 @@ def send_email():
         return jsonify({"status": "error", "message": "Configured sender email is invalid"}), 500
 
     # Compose email content (payload overrides allowed)
-    subject = data.get("subject", "Action Required: Complete Your Signup")
-    html_body = data.get("htmlBody") or f"""
-      <p>Dear <strong>{company_name}</strong>,</p>
-      <p>{user_name} has manually added your firm to our platform. Please complete the signup process.</p>
-      <p>Kind regards,<br><strong>Vincent Civic Platform</strong></p>
-    """
-    text_body = data.get("textBody") or f"Dear {company_name},\n\n{user_name} has manually added your firm to our platform. Please complete the signup process.\n\nKind regards,\nVincent Civic Platform"
+    subject = data.get("subject", f"Action Required: Please complete your WIL signup with {company_name}")
+
+    # Build readable student/adder info
+    # Prefer explicit addedByFirstName/LastName; if missing, fall back to user_name
+    student_full_name = None
+    if added_by_first or added_by_last:
+        student_full_name = f"{(added_by_first or '').strip()} {(added_by_last or '').strip()}".strip()
+    student_full_name = student_full_name or user_name or "Student"
+
+    # HTML body
+    html_body = data.get("htmlBody")
+    if not html_body:
+        proof_section = f'<p>If you wish to review the proof document provided by the student, click <a href="{proof_file_url}">here</a>.</p>' if proof_file_url else ""
+        manual_code_line = f"<p>Manual firm reference: <strong>{manual_firm_code}</strong></p>" if manual_firm_code else ""
+        student_email_line = f"<p>Student email: <a href='mailto:{student_email}'>{student_email}</a></p>" if student_email else ""
+        adder_info = f"<p>Added by: <strong>{student_full_name}</strong>{f' (user code: {adder_user_code})' if adder_user_code else ''}</p>"
+
+        html_body = f"""
+          <p>Dear <strong>{rep_display}</strong>,</p>
+          <p>We are writing to inform you that one of our students has expressed interest in doing their WIL at your firm and has taken the initiative to add your firm details to our platform.</p>
+          <p>We hereby ask that you complete the signup process on the WIL system so we can fully support the student during their placement.</p>
+          <h4>Student Details</h4>
+          <p><strong>Name:</strong> {student_full_name}</p>
+          {student_email_line}
+          {manual_code_line}
+          {proof_section}
+          {adder_info}
+          <p>Kind regards,<br><strong>Vincent Civic Platform</strong></p>
+        """
+
+    # Plain-text fallback
+    text_body = data.get("textBody")
+    if not text_body:
+        proof_section_txt = f"\nProof: {proof_file_url}" if proof_file_url else ""
+        manual_code_txt = f"\nManual firm reference: {manual_firm_code}" if manual_firm_code else ""
+        student_email_txt = f"\nStudent email: {student_email}" if student_email else ""
+        adder_info_txt = f"\nAdded by: {student_full_name}" + (f" (user code: {adder_user_code})" if adder_user_code else "")
+
+        text_body = (
+            f"Dear {rep_display},\n\n"
+            f"We are writing to inform you that one of our students has expressed interest in doing their WIL at your firm and has taken the initiative to add your firm details to our platform.\n\n"
+            f"We hereby ask that you complete the signup process on the WIL system so we can fully support the student during their placement.\n\n"
+            f"Student Details:\nName: {student_full_name}"
+            f"{student_email_txt}"
+            f"{manual_code_txt}"
+            f"{proof_section_txt}\n\n"
+            f"{adder_info_txt}\n\n"
+            f"Kind regards,\nVincent Civic Platform"
+        )
 
     # Build Brevo email model
     email = sib_api_v3_sdk.SendSmtpEmail(
