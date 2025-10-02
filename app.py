@@ -1435,6 +1435,111 @@ def send_email():
             "traceback_tail": tb_lines[-12:]  # last lines only
         }), 500
 
+
+@app.route('/send-confirmation-letter', methods=['POST'])
+def send_confirmation_letter():
+    if api_instance is None:
+        return jsonify({"status": "error", "message": "Email service not configured"}), 500
+
+    data = request.get_json(silent=True)
+    required = [
+        "studentEmail", "studentName", "studentCode",
+        "firmName", "firmEmail", "coordinatorName", "placementId"
+    ]
+    missing = [k for k in required if not data.get(k)]
+    if missing:
+        return jsonify({"status": "error", "message": f"Missing required fields: {', '.join(missing)}"}), 400
+
+    student_email = data["studentEmail"]
+    student_name = data["studentName"]
+    student_code = data["studentCode"]
+    firm_name = data["firmName"]
+    firm_email = data["firmEmail"]
+    coordinator_name = data["coordinatorName"]
+    coordinator_code = data.get("coordinatorCode")
+    placement_id = data["placementId"]
+
+    sender_email = VERIFIED_SENDER_EMAIL
+    if not sender_email:
+        return jsonify({"status": "error", "message": "No sender email configured"}), 500
+    sender_name = "WELAP Coordinator"
+
+    # Email to STUDENT
+    student_subject = f"WIL Placement Confirmed at {firm_name}"
+    student_html = f"""
+      <p>Dear <strong>{student_name}</strong>,</p>
+      <p>We are writing to inform you that <strong>{firm_name}</strong> has confirmed your WIL placement.</p>
+      <p>Please acknowledge this placement to finalize your WIL process.</p>
+      <p>Coordinator: {coordinator_name}<br>Student Code: {student_code}</p>
+      <p>Kind regards,<br><strong>{coordinator_name}</strong></p>
+    """
+    student_text = f"""
+      Dear {student_name},
+
+      We are writing to inform you that {firm_name} has confirmed your WIL placement.
+
+      Please acknowledge this placement to finalize your WIL process.
+
+      Coordinator: {coordinator_name}
+      Student Code: {student_code}
+
+      Kind regards,
+      {coordinator_name}
+    """
+
+    # Email to FIRM
+    firm_subject = f"Student {student_name} Placement Confirmed"
+    firm_html = f"""
+      <p>Dear <strong>{firm_name}</strong> representative,</p>
+      <p>This is to confirm that <strong>{student_name}</strong> (Student Code: {student_code}) has been successfully placed at your firm for WIL.</p>
+      <p>Coordinator: {coordinator_name}</p>
+      <p>Kind regards,<br><strong>{coordinator_name}</strong></p>
+    """
+    firm_text = f"""
+      Dear {firm_name} representative,
+
+      This is to confirm that {student_name} (Student Code: {student_code}) has been successfully placed at your firm for WIL.
+
+      Coordinator: {coordinator_name}
+
+      Kind regards,
+      {coordinator_name}
+    """
+
+    try:
+        # Send student email
+        email_student = sib_api_v3_sdk.SendSmtpEmail(
+            to=[{"email": student_email}],
+            sender={"name": sender_name, "email": sender_email},
+            subject=student_subject,
+            html_content=student_html,
+            text_content=student_text
+        )
+        api_instance.send_transac_email(email_student)
+
+        # Send firm email
+        email_firm = sib_api_v3_sdk.SendSmtpEmail(
+            to=[{"email": firm_email}],
+            sender={"name": sender_name, "email": sender_email},
+            subject=firm_subject,
+            html_content=firm_html,
+            text_content=firm_text
+        )
+        api_instance.send_transac_email(email_firm)
+
+        # Update Firebase application status to 'hired'
+        db.reference(f"applications/{student_code}/{placement_id}").update({
+            "status": "hired",
+            "confirmedBy": coordinator_name,
+            "confirmedAt": datetime.utcnow().isoformat()
+        })
+
+        return jsonify({"status": "success", "message": "Confirmation emails sent and placement updated"}), 200
+
+    except Exception as e:
+        app.logger.exception("Failed to send confirmation emails")
+        return jsonify({"status": "error", "message": str(e)}), 500
+
         
 # ----------------
 # Run App
