@@ -1529,6 +1529,85 @@ def send_confirmation_letter():
         app.logger.exception("Failed to send confirmation emails")
         return jsonify({"status": "error", "message": str(e)}), 500
 
+
+@app.route("/api/send-interview-email", methods=["POST"])
+def send_interview_email():
+    if not api_instance:
+        return jsonify({"error": "Email service not configured"}), 500
+
+    data = request.get_json() or {}
+    to_email = data.get("toEmail")
+    surname = data.get("surname", "")
+    firm_name = data.get("firmName", "")
+    interview = data.get("interview", {})
+    student_name = data.get("studentName", "")
+
+    if not to_email:
+        return jsonify({"error": "toEmail is required"}), 400
+
+    # Build simple text + HTML body
+    date = interview.get("date", "TBA")
+    time = interview.get("time", "TBA")
+    location = interview.get("location", "TBA")
+    dress = interview.get("dressCode", "TBA")
+
+    subject = f"Interview scheduled by {firm_name}"
+    plain_text = (
+        f"Good day {surname},\n\n"
+        f"We would like to inform you that {firm_name} has scheduled an interview.\n\n"
+        f"Interview details:\n"
+        f"- Date: {date}\n"
+        f"- Time: {time}\n"
+        f"- Location: {location}\n"
+        f"- Dress code: {dress}\n\n"
+        "Kind regards,\n"
+        f"{firm_name}"
+    )
+
+    html_content = f"""
+    <html>
+      <body>
+        <p>Good day {surname},</p>
+        <p>We would like to inform you that <strong>{firm_name}</strong> has scheduled an interview.</p>
+        <h4>Interview details</h4>
+        <ul>
+          <li><strong>Date:</strong> {date}</li>
+          <li><strong>Time:</strong> {time}</li>
+          <li><strong>Location:</strong> {location}</li>
+          <li><strong>Dress code:</strong> {dress}</li>
+        </ul>
+        <p>Kind regards,<br/>{firm_name}</p>
+      </body>
+    </html>
+    """
+
+    # Prepare Brevo send API body
+    send_smtp_email = sib_api_v3_sdk.SendSmtpEmail(
+        to=[{"email": to_email}],
+        subject=subject,
+        html_content=html_content,
+        text_content=plain_text
+    )
+
+    # set sender if VERIFIED_SENDER_EMAIL configured; else let Brevo default (if possible)
+    if VERIFIED_SENDER_EMAIL:
+        send_smtp_email.sender = {"email": VERIFIED_SENDER_EMAIL}
+
+    try:
+        api_response = api_instance.send_transac_email(send_smtp_email)
+        return jsonify({"ok": True, "brevo_response": api_response.to_dict()})
+    except ApiException as e:
+        app.logger.error("Brevo APIException: %s", e)
+        # return the error body if present
+        try:
+            body = e.body.decode() if isinstance(e.body, bytes) else e.body
+        except Exception:
+            body = str(e)
+        return jsonify({"error": "Brevo API error", "details": body}), 500
+    except Exception as e:
+        app.logger.exception("Error sending email")
+        return jsonify({"error": "Internal server error", "details": str(e)}), 500
+
         
 # ----------------
 # Run App
