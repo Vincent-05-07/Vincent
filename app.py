@@ -1608,6 +1608,120 @@ def send_interview_email():
         app.logger.exception("Error sending email")
         return jsonify({"error": "Internal server error", "details": str(e)}), 500
 
+@app.route("/api/notify-firm-on-accept", methods=["POST"])
+def notify_firm_on_accept():
+    """
+    Expects JSON:
+    {
+      "firmEmail": "contact@company.com",    # optional (best-effort)
+      "firmCode": "FIRM123",
+      "firmName": "ACME Ltd",
+      "studentEmail": "student@example.com",
+      "studentName": "Jane Doe",
+      "interview": { "date": "...", "time": "...", "location": "...", "dressCode": "..." },
+      "type": "accept"  # optional, can be 'accept' (default) or 'decline'
+    }
+    """
+    if not api_instance:
+        return jsonify({"error": "Email service not configured"}), 500
+
+    data = request.get_json() or {}
+    firm_email = data.get("firmEmail")
+    firm_name = data.get("firmName", data.get("firmCode", "Your firm"))
+    firm_code = data.get("firmCode")
+    student_email = data.get("studentEmail", "")
+    student_name = data.get("studentName", "")
+    interview = data.get("interview", {}) or {}
+    action_type = (data.get("type") or "accept").lower()
+
+    # Compose email to firm
+    subject = f"Student {action_type}ed interview - {student_name or student_email}"
+    date = interview.get("date", "TBA")
+    time = interview.get("time", "TBA")
+    location = interview.get("location", "TBA")
+    dress = interview.get("dressCode", "TBA")
+
+    if action_type == 'decline':
+        plain_text = (
+            f"Dear {firm_name},\n\n"
+            f"Please note that the student {student_name or student_email} has declined the interview scheduled with your firm.\n\n"
+            f"Interview (previous details):\n"
+            f"- Date: {date}\n"
+            f"- Time: {time}\n"
+            f"- Location: {location}\n\n"
+            "Kind regards,\nProject Connect"
+        )
+        html_content = f"""
+        <html><body>
+          <p>Dear {firm_name},</p>
+          <p>The student <strong>{student_name or student_email}</strong> has <strong>declined</strong> the interview.</p>
+          <h4>Interview (previous details)</h4>
+          <ul>
+            <li><strong>Date:</strong> {date}</li>
+            <li><strong>Time:</strong> {time}</li>
+            <li><strong>Location:</strong> {location}</li>
+          </ul>
+          <p>Kind regards,<br/>Project Connect</p>
+        </body></html>
+        """
+    else:
+        plain_text = (
+            f"Dear {firm_name},\n\n"
+            f"The student {student_name or student_email} has accepted the interview.\n\n"
+            f"Student contact: {student_email}\n\n"
+            f"Interview details:\n"
+            f"- Date: {date}\n"
+            f"- Time: {time}\n"
+            f"- Location: {location}\n"
+            f"- Dress code: {dress}\n\n"
+            "Kind regards,\nProject Connect"
+        )
+        html_content = f"""
+        <html><body>
+          <p>Dear {firm_name},</p>
+          <p>The student <strong>{student_name or student_email}</strong> has <strong>accepted</strong> the interview.</p>
+          <p><strong>Student contact:</strong> {student_email}</p>
+          <h4>Interview details</h4>
+          <ul>
+            <li><strong>Date:</strong> {date}</li>
+            <li><strong>Time:</strong> {time}</li>
+            <li><strong>Location:</strong> {location}</li>
+            <li><strong>Dress code:</strong> {dress}</li>
+          </ul>
+          <p>Kind regards,<br/>Project Connect</p>
+        </body></html>
+        """
+
+    # If no recipient email, return OK but warn
+    if not firm_email:
+        app.logger.warning("notify_firm_on_accept called without firmEmail; skipping email send.")
+        return jsonify({"ok": True, "warning": "No firmEmail provided; no email sent. You should notify the firm in-app."})
+
+    send_smtp_email = sib_api_v3_sdk.SendSmtpEmail(
+        to=[{"email": firm_email}],
+        subject=subject,
+        html_content=html_content,
+        text_content=plain_text
+    )
+
+    if VERIFIED_SENDER_EMAIL:
+        send_smtp_email.sender = {"email": VERIFIED_SENDER_EMAIL}
+
+    try:
+        api_response = api_instance.send_transac_email(send_smtp_email)
+        return jsonify({"ok": True, "brevo_response": api_response.to_dict()})
+    except ApiException as e:
+        app.logger.error("Brevo APIException (notify_firm_on_accept): %s", e)
+        try:
+            body = e.body.decode() if isinstance(e.body, bytes) else e.body
+        except Exception:
+            body = str(e)
+        return jsonify({"error": "Brevo API error", "details": body}), 500
+    except Exception as e:
+        app.logger.exception("Error sending firm notification email")
+        return jsonify({"error": "Internal server error", "details": str(e)}), 500
+
+
         
 # ----------------
 # Run App
