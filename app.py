@@ -1138,6 +1138,37 @@ def update_job(job_id):
         app.logger.exception("DB error updating job")
         return jsonify({"error": "Internal server error", "details": str(e)}), 500
 
+@app.route("/api/jobs/<int:job_id>/view", methods=["GET", "OPTIONS"])
+@cross_origin()
+def view_job_file(job_id):
+    # Handle preflight
+    if request.method == "OPTIONS":
+        return "", 200
+
+    job = Job.query.get_or_404(job_id)
+
+    if not job.file_data:
+        return jsonify({"error": "No file uploaded"}), 404
+
+    # determine mime type
+    mime_type = job.mime_type or mimetypes.guess_type(job.file_name or "file.bin")[0] or "application/octet-stream"
+
+    # send inline so the browser attempts to open it in a tab (PDFs, images, text, etc.)
+    # We still set a filename so the browser knows how to name it when saving from viewer.
+    response = send_file(
+        BytesIO(job.file_data),
+        mimetype=mime_type,
+        as_attachment=False
+    )
+    # Ensure Content-Disposition is inline with filename (some browsers respect send_file args, others need this)
+    try:
+        filename = job.file_name or "file"
+        response.headers.set("Content-Disposition", f'inline; filename="{filename}"')
+    except Exception:
+        pass
+
+    return response
+
 # ----------------
 # DELETE JOB
 # ----------------
