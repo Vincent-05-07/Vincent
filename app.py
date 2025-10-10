@@ -1812,7 +1812,142 @@ def notify_firm_on_accept():
         app.logger.exception("Error in notify_firm_on_accept")
         return jsonify({"error": "Internal server error", "details": str(e)}), 500
 
+
+# Add this to your Flask app (app.py)
+
+@app.route('/api/send-contract-email', methods=['POST'])
+def send_contract_email():
+    """
+    Send contract signing invitation email to student using Brevo
+    """
+    try:
+        data = request.get_json()
         
+        # Required fields
+        required_fields = ['studentName', 'studentEmail', 'firmName', 'date', 'time', 'location']
+        for field in required_fields:
+            if not data.get(field):
+                return jsonify({'success': False, 'error': f'Missing required field: {field}'}), 400
+        
+        student_name = data['studentName']
+        student_email = data['studentEmail']
+        firm_name = data['firmName']
+        date = data['date']
+        time = data['time']
+        location = data['location']
+        instructions = data.get('instructions', '')
+        
+        # Format the date properly
+        try:
+            contract_date = datetime.strptime(date, '%Y-%m-%d').strftime('%B %d, %Y')
+        except:
+            contract_date = date
+        
+        # Create email content
+        subject = f"Contract Signing Invitation from {firm_name}"
+        
+        html_content = f"""
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <style>
+                body {{ font-family: Arial, sans-serif; line-height: 1.6; color: #333; }}
+                .container {{ max-width: 600px; margin: 0 auto; padding: 20px; }}
+                .header {{ background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 30px; text-align: center; border-radius: 10px 10px 0 0; }}
+                .content {{ background: #f9f9f9; padding: 30px; border-radius: 0 0 10px 10px; }}
+                .details {{ background: white; padding: 20px; border-radius: 8px; margin: 20px 0; border-left: 4px solid #667eea; }}
+                .footer {{ text-align: center; margin-top: 30px; color: #666; font-size: 14px; }}
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <div class="header">
+                    <h1>Contract Signing Invitation</h1>
+                    <p>We're excited to move forward with your application!</p>
+                </div>
+                <div class="content">
+                    <p>Dear <strong>{student_name}</strong>,</p>
+                    
+                    <p>We are pleased to inform you that <strong>{firm_name}</strong> would like to invite you to sign your employment contract.</p>
+                    
+                    <div class="details">
+                        <h3>Contract Signing Details:</h3>
+                        <p><strong>Date:</strong> {contract_date}</p>
+                        <p><strong>Time:</strong> {time}</p>
+                        <p><strong>Location:</strong> {location}</p>
+                        {f'<p><strong>Additional Instructions:</strong> {instructions}</p>' if instructions else ''}
+                    </div>
+                    
+                    <p>Please ensure you bring the following documents with you:</p>
+                    <ul>
+                        <li>Your original ID document</li>
+                        <li>Any other required documentation as specified</li>
+                        <li>A pen for signing</li>
+                    </ul>
+                    
+                    <p>If you have any questions or need to reschedule, please contact us as soon as possible.</p>
+                    
+                    <p>We look forward to welcoming you to the team!</p>
+                </div>
+                <div class="footer">
+                    <p>Kind regards,<br><strong>WELAP System</strong></p>
+                    <p>Work Integrated Learning Platform</p>
+                </div>
+            </div>
+        </body>
+        </html>
+        """
+        
+        # Plain text version as fallback
+        text_content = f"""
+        Contract Signing Invitation
+        
+        Dear {student_name},
+        
+        We are pleased to inform you that {firm_name} would like to invite you to sign your employment contract.
+        
+        Contract Signing Details:
+        Date: {contract_date}
+        Time: {time}
+        Location: {location}
+        {f'Additional Instructions: {instructions}' if instructions else ''}
+        
+        Please ensure you bring your original ID document and any other required documentation.
+        
+        If you have any questions or need to reschedule, please contact us as soon as possible.
+        
+        We look forward to welcoming you to the team!
+        
+        Kind regards,
+        WELAP System
+        Work Integrated Learning Platform
+        """
+        
+        # Send email using Brevo
+        if api_instance and VERIFIED_SENDER_EMAIL:
+            send_smtp_email = sib_api_v3_sdk.SendSmtpEmail(
+                to=[{"email": student_email, "name": student_name}],
+                sender={"name": "WELAP System", "email": VERIFIED_SENDER_EMAIL},
+                subject=subject,
+                html_content=html_content,
+                text_content=text_content
+            )
+            
+            try:
+                api_response = api_instance.send_transac_email(send_smtp_email)
+                app.logger.info(f"Contract email sent to {student_email}. Message ID: {api_response.message_id}")
+                return jsonify({'success': True, 'message_id': api_response.message_id})
+                
+            except ApiException as e:
+                app.logger.error(f"Brevo API exception when sending contract email: {e}")
+                return jsonify({'success': False, 'error': 'Failed to send email via Brevo'}), 500
+        else:
+            app.logger.error("Brevo client not properly initialized - cannot send contract email")
+            return jsonify({'success': False, 'error': 'Email service not configured'}), 500
+            
+    except Exception as e:
+        app.logger.error(f"Error in send_contract_email: {str(e)}")
+        return jsonify({'success': False, 'error': 'Internal server error'}), 500
 # ----------------
 # Run App
 # ----------------
