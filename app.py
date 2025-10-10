@@ -1077,34 +1077,33 @@ def get_jobs():
 # ----------------
 # READ ONE JOB
 # ----------------
-@app.route("/api/jobs/<int:job_id>", methods=["GET", "OPTIONS"])
-@cross_origin()
-def get_job(job_id):
-    if request.method == "OPTIONS":
-        return "", 200
-    job = Job.query.get_or_404(job_id)
-    return jsonify(job.to_dict()), 200
-
-# ----------------
-# DOWNLOAD JOB FILE
-# ----------------
-@app.route("/api/jobs/<int:job_id>/download", methods=["GET", "OPTIONS"])
-@cross_origin()
+@app.route("/api/jobs/<int:job_id>/download", methods=["GET"])
 def download_job_file(job_id):
-    if request.method == "OPTIONS":
-        return "", 200
     job = Job.query.get_or_404(job_id)
     if not job.file_data:
-        return jsonify({"error": "No file uploaded"}), 404
+        abort(404, description="File not found.")
 
-    mime_type = job.mime_type or mimetypes.guess_type(job.file_name or "file.bin")[0]
+    mime_type = mimetypes.guess_type(job.file_name or "file.bin")[0] or "application/octet-stream"
     return send_file(
         BytesIO(job.file_data),
-        mimetype=mime_type or "application/octet-stream",
-        as_attachment=True,
-        download_name=job.file_name or "downloaded_file"
+        mimetype=mime_type,
+        as_attachment=True,      # Force download
+        download_name=job.file_name or "file.bin"
     )
 
+@app.route("/api/jobs/<int:job_id>/view", methods=["GET"])
+def view_job_file_inline(job_id):
+    job = Job.query.get_or_404(job_id)
+    if not job.file_data:
+        abort(404, description="File not found.")
+
+    mime_type = mimetypes.guess_type(job.file_name or "file.bin")[0] or "application/octet-stream"
+    return send_file(
+        BytesIO(job.file_data),
+        mimetype=mime_type,
+        as_attachment=False,     # Inline viewing
+        download_name=job.file_name or "file.bin"
+    )
 # ----------------
 # UPDATE JOB
 # ----------------
