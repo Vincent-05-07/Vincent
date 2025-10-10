@@ -824,6 +824,132 @@ def serve_image(user_code, filename):
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+
+@app.route("/firm-images/<int:image_id>", methods=["PUT", "OPTIONS"])
+@cross_origin()
+def update_firm_image(image_id):
+    if request.method == "OPTIONS":
+        return "", 200
+
+    try:
+        if "image" not in request.files:
+            return jsonify({"error": "No image file provided"}), 400
+
+        image_file = request.files["image"]
+        if image_file.filename == '':
+            return jsonify({"error": "No file selected"}), 400
+
+        if not image_file.content_type.startswith('image/'):
+            return jsonify({"error": "File must be an image"}), 400
+
+        # Read new image data
+        image_data = psycopg2.Binary(image_file.read())
+        original_filename = image_file.filename
+        safe_filename = secure_filename(original_filename)
+        
+        conn = get_connection()
+        cur = conn.cursor()
+        
+        # Check if image exists and get user_code for file_path
+        cur.execute("SELECT user_code FROM firm_images WHERE id = %s", (image_id,))
+        existing = cur.fetchone()
+        
+        if not existing:
+            cur.close()
+            conn.close()
+            return jsonify({"error": "Image not found"}), 404
+
+        user_code = existing[0]
+        file_path = f"wil-firm-pics/{user_code}/{safe_filename}"
+        
+        # Update image
+        cur.execute("""
+            UPDATE firm_images 
+            SET file_path = %s, image_data = %s, original_filename = %s, updated_at = %s
+            WHERE id = %s
+        """, (file_path, image_data, original_filename, datetime.utcnow(), image_id))
+        
+        conn.commit()
+        cur.close()
+        conn.close()
+
+        return jsonify({
+            "message": "Image updated successfully",
+            "id": image_id,
+            "file_path": file_path,
+            "original_filename": original_filename
+        }), 200
+
+    except Exception as e:
+        if 'conn' in locals():
+            conn.rollback()
+            cur.close()
+            conn.close()
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/firm-images/<int:image_id>", methods=["DELETE", "OPTIONS"])
+@cross_origin()
+def delete_firm_image(image_id):
+    if request.method == "OPTIONS":
+        return "", 200
+
+    try:
+        conn = get_connection()
+        cur = conn.cursor()
+        
+        # Check if image exists
+        cur.execute("SELECT id FROM firm_images WHERE id = %s", (image_id,))
+        if not cur.fetchone():
+            cur.close()
+            conn.close()
+            return jsonify({"error": "Image not found"}), 404
+
+        # Delete image
+        cur.execute("DELETE FROM firm_images WHERE id = %s", (image_id,))
+        conn.commit()
+        cur.close()
+        conn.close()
+
+        return jsonify({"message": "Image deleted successfully"}), 200
+
+    except Exception as e:
+        if 'conn' in locals():
+            conn.rollback()
+            cur.close()
+            conn.close()
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/firm-images/user/<string:user_code>", methods=["DELETE", "OPTIONS"])
+@cross_origin()
+def delete_all_firm_images(user_code):
+    if request.method == "OPTIONS":
+        return "", 200
+
+    try:
+        conn = get_connection()
+        cur = conn.cursor()
+        
+        # Delete all images for user
+        cur.execute("DELETE FROM firm_images WHERE user_code = %s", (user_code,))
+        deleted_count = cur.rowcount
+        
+        conn.commit()
+        cur.close()
+        conn.close()
+
+        return jsonify({
+            "message": f"Deleted {deleted_count} images for user {user_code}",
+            "deleted_count": deleted_count
+        }), 200
+
+    except Exception as e:
+        if 'conn' in locals():
+            conn.rollback()
+            cur.close()
+            conn.close()
+        return jsonify({"error": str(e)}), 500
 # ----------------
 # CREATE / UPLOAD
 # ----------------
